@@ -1,0 +1,4 @@
+# Built binary
+/lg
+# Local lg state (if a developer runs it in-tree)
+/.lg/
