@@ -41,8 +41,13 @@ _lg_accept_line() {
 zle -N accept-line _lg_accept_line
 
 _lg_precmd() {
+  # Capture the user's real prompt once, then always rebuild from it so the tag
+  # never stacks up.
+  [[ -z "$LG_BASE_PS1" ]] && LG_BASE_PS1="$PS1"
   if command lg hook is-source --tab "$LG_TAB_ID" 2>/dev/null; then
-    export PS1="%F{yellow}[SOURCE]%f ${LG_BASE_PS1:-$PS1}"
+    PS1="%K{208}%F{black} source/remote %f%k $LG_BASE_PS1"
+  else
+    PS1="%K{34}%F{black} ghost/local %f%k $LG_BASE_PS1"
   fi
 }
 typeset -ga precmd_functions
@@ -65,6 +70,20 @@ _lg_debug() {
   fi
 }
 trap '_lg_debug' DEBUG
+
+# Prompt tag: show where commands run (ghost/local vs source/remote).
+_lg_bash_prompt() {
+  [ -z "$LG_BASE_PS1" ] && LG_BASE_PS1="$PS1"
+  if command lg hook is-source --tab "$LG_TAB_ID" 2>/dev/null; then
+    PS1="\[\e[48;5;208m\e[30m\] source/remote \[\e[0m\] $LG_BASE_PS1"
+  else
+    PS1="\[\e[48;5;34m\e[30m\] ghost/local \[\e[0m\] $LG_BASE_PS1"
+  fi
+}
+case "$PROMPT_COMMAND" in
+  *_lg_bash_prompt*) ;;
+  *) PROMPT_COMMAND="_lg_bash_prompt${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+esac
 `
 
 // InstallIntegration writes the integration scripts to ~/.lg/hooks and returns

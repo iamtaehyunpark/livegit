@@ -32,6 +32,7 @@ func (t *tmuxManager) ensure(name string, cols, rows uint16) (created bool, err 
 		rows = 24
 	}
 	if err := t.cmd("has-session", "-t", name).Run(); err == nil {
+		t.tagStatus(name)
 		return false, nil // already exists
 	}
 	out, err := t.cmd("new-session", "-d", "-s", name,
@@ -39,7 +40,16 @@ func (t *tmuxManager) ensure(name string, cols, rows uint16) (created bool, err 
 	if err != nil {
 		return false, fmt.Errorf("tmux new-session: %v: %s", err, strings.TrimSpace(string(out)))
 	}
+	t.tagStatus(name)
 	return true, nil
+}
+
+// tagStatus puts a clear "(source/remote)" badge in the session's status bar so
+// it's obvious commands here run on the server.
+func (t *tmuxManager) tagStatus(name string) {
+	_ = t.cmd("set-option", "-t", name, "status-left",
+		"#[bg=colour208,fg=black,bold] source/remote #[default] ").Run()
+	_ = t.cmd("set-option", "-t", name, "status-left-length", "24").Run()
 }
 
 // attachCmd builds the command that bridges a PTY to the session. It is run
