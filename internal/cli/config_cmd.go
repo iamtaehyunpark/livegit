@@ -46,6 +46,7 @@ func configFields(c *config.Config) map[string]field {
 		"cache.evict_after_idle_minutes": {func(c *config.Config) string { return strconv.Itoa(c.Cache.EvictAfterIdleMinutes) }, setInt(&c.Cache.EvictAfterIdleMinutes)},
 		"cache.max_cache_size_gb":        {func(c *config.Config) string { return strconv.Itoa(c.Cache.MaxCacheSizeGB) }, setInt(&c.Cache.MaxCacheSizeGB)},
 		"offline.on_source_trigger":      {func(c *config.Config) string { return c.Offline.OnSourceTrigger }, func(c *config.Config, v string) error { c.Offline.OnSourceTrigger = v; return nil }},
+		"default_target":                 {func(c *config.Config) string { return c.DefaultTarget }, func(c *config.Config, v string) error { c.DefaultTarget = v; return nil }},
 		"log_level":                      {func(c *config.Config) string { return c.LogLevel }, func(c *config.Config, v string) error { c.LogLevel = v; return nil }},
 	}
 }

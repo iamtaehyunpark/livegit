@@ -59,6 +59,12 @@ type Config struct {
 
 	ReadonlyCommands []string `yaml:"readonly_commands"`
 
+	// DefaultTarget: where `lg shell` starts. "source" drops you straight into a
+	// persistent tmux session on Source (commands run on the server by default,
+	// with full state/persistence); detaching returns to a LOCAL shell. "local"
+	// (default) starts local and only switches on triggers.
+	DefaultTarget string `yaml:"default_target"`
+
 	LogLevel string `yaml:"log_level"` // debug|info|warn|error (default info)
 }
 
@@ -151,6 +157,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Offline.OnSourceTrigger == "" {
 		c.Offline.OnSourceTrigger = "queue"
+	}
+	if c.DefaultTarget == "" {
+		c.DefaultTarget = "local"
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
