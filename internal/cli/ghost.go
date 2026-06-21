@@ -2,11 +2,26 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/taehyun/lg/internal/config"
 	"github.com/taehyun/lg/internal/fuse"
+	"github.com/taehyun/lg/internal/logx"
 	"github.com/taehyun/lg/internal/transport"
 )
+
+// routeLogsToFile sends lg's own logs to ~/.lg/lg.log instead of the terminal,
+// so background reconnect/health noise from long-running commands (shell,
+// enter-source) doesn't spam the user's shell. Returns the log path.
+func routeLogsToFile(c *config.Config) string {
+	path := config.LogPath()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return "" // fall back to stderr (already configured)
+	}
+	logx.Init(c.LogLevel, f)
+	return path
+}
 
 // loadGhost loads config and asserts the ghost role.
 func loadGhost() (*config.Config, error) {

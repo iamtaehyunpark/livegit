@@ -60,13 +60,21 @@ func (c *Client) OnInvalidate(fn func(proto.Invalidate)) { c.invalidate = fn }
 func (c *Client) Start() { go c.supervise() }
 
 // supervise keeps a connection alive, reconnecting with exponential backoff.
+// To avoid flooding logs while a host is unreachable, the failure is logged once
+// (WARN) on the first attempt of an outage; subsequent retries log at DEBUG.
 func (c *Client) supervise() {
 	log := logx.For("client")
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
+	loggedOutage := false
 	for c.ctx.Err() == nil {
 		if err := c.connectOnce(); err != nil {
-			log.Warn("connect failed", "err", err, "retry_in", backoff)
+			if !loggedOutage {
+				log.Warn("connect failed; will keep retrying quietly", "err", err)
+				loggedOutage = true
+			} else {
+				log.Debug("connect retry failed", "err", err, "retry_in", backoff)
+			}
 			c.status.set(false)
 			select {
 			case <-c.ctx.Done():
@@ -79,6 +87,7 @@ func (c *Client) supervise() {
 			continue
 		}
 		backoff = time.Second // reset after a healthy connection
+		loggedOutage = false  // next outage will log again
 		// connectOnce blocks until the connection dies.
 	}
 }

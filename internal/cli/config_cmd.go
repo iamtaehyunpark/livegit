@@ -41,6 +41,7 @@ func configFields(c *config.Config) map[string]field {
 		"source.user":                    {func(c *config.Config) string { return c.Source.User }, func(c *config.Config, v string) error { c.Source.User = v; return nil }},
 		"source.port":                    {func(c *config.Config) string { return strconv.Itoa(c.Source.Port) }, setInt(&c.Source.Port)},
 		"source.agent_bin":               {func(c *config.Config) string { return c.Source.AgentBin }, func(c *config.Config, v string) error { c.Source.AgentBin = v; return nil }},
+		"source.ssh_mode":                {func(c *config.Config) string { return c.Source.SSHMode }, func(c *config.Config, v string) error { c.Source.SSHMode = v; return nil }},
 		"local_root":                     {func(c *config.Config) string { return c.LocalRoot }, func(c *config.Config, v string) error { c.LocalRoot = v; return nil }},
 		"cache.evict_after_idle_minutes": {func(c *config.Config) string { return strconv.Itoa(c.Cache.EvictAfterIdleMinutes) }, setInt(&c.Cache.EvictAfterIdleMinutes)},
 		"cache.max_cache_size_gb":        {func(c *config.Config) string { return strconv.Itoa(c.Cache.MaxCacheSizeGB) }, setInt(&c.Cache.MaxCacheSizeGB)},

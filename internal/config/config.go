@@ -29,6 +29,12 @@ type Config struct {
 		User       string `yaml:"user"`        // optional; defaults to $USER
 		Port       int    `yaml:"port"`        // optional; defaults to 22
 		AgentBin   string `yaml:"agent_bin"`   // path to `lg` on Source; defaults to "lg"
+		// SSHMode selects the transport:
+		//   "system" (default): shell out to the `ssh` binary, so ~/.ssh/config
+		//     (Host aliases, ProxyJump, Duo/ControlMaster, known_hosts) all apply.
+		//     This is what makes lab/bastion/2FA hosts work.
+		//   "native": use the built-in Go ssh client (ignores ~/.ssh/config).
+		SSHMode string `yaml:"ssh_mode"`
 	} `yaml:"source"`
 
 	LocalRoot string `yaml:"local_root"` // absolute path of the FUSE mount on Ghost
@@ -80,6 +86,10 @@ func CacheDir() string { return filepath.Join(Dir(), "cache") }
 // ConflictsPath records detected conflicts for `lg status` (§4.4).
 func ConflictsPath() string { return filepath.Join(Dir(), "conflicts.log") }
 
+// LogPath is where long-running commands (shell, enter-source) write their logs,
+// so background reconnect noise never spams the user's terminal.
+func LogPath() string { return filepath.Join(Dir(), "lg.log") }
+
 // Exists reports whether a config file is present at the default path.
 func Exists() bool {
 	_, err := os.Stat(Path())
@@ -129,6 +139,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Source.AgentBin == "" {
 		c.Source.AgentBin = "lg"
+	}
+	if c.Source.SSHMode == "" {
+		c.Source.SSHMode = "system"
 	}
 	if c.Cache.EvictAfterIdleMinutes == 0 {
 		c.Cache.EvictAfterIdleMinutes = 30

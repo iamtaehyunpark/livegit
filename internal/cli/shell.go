@@ -63,6 +63,9 @@ func runShell() error {
 	defer store.Close()
 	defer journal.Close()
 
+	// Send background connection/health logs to a file, not the terminal.
+	logPath := routeLogsToFile(c)
+
 	// Long-lived connection + FUSE mount for this shell session.
 	client := newClient(c)
 	defer client.Close()
@@ -85,7 +88,12 @@ func runShell() error {
 	}
 	defer shell.ClearState(tabID)
 
-	fmt.Fprintf(os.Stderr, "lg: mounted %s, entering shell (tab %s)\n", c.LocalRoot, tabID)
+	fmt.Fprintf(os.Stderr, "lg: mounted %s (tab %s)\n", c.LocalRoot, tabID)
+	fmt.Fprintf(os.Stderr, "lg: connecting to %s in the background", c.Source.Host)
+	if logPath != "" {
+		fmt.Fprintf(os.Stderr, " — logs: %s", logPath)
+	}
+	fmt.Fprintf(os.Stderr, "\nlg: type 'exit' to leave (unmounts and disconnects cleanly).\n")
 	return execUserShell(c, tabID)
 }
 

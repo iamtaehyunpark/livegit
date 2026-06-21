@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/taehyun/lg/internal/config"
@@ -13,28 +16,33 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-// sshConn is the live SSH connection plus the exec session that carries yamux.
+// sshConn is a live connection to Source whose pipe carries the yamux session.
+// closer tears down whatever backs it (a native ssh client, or a spawned `ssh`
+// subprocess).
 type sshConn struct {
-	client  *ssh.Client
-	session *ssh.Session
-	pipe    *rwc
+	pipe   *rwc
+	closer func() error
 }
 
 func (c *sshConn) Close() error {
-	if c.session != nil {
-		_ = c.session.Close()
-	}
-	if c.client != nil {
-		return c.client.Close()
+	if c.closer != nil {
+		return c.closer()
 	}
 	return nil
 }
 
-// dialSSH connects to Source and starts `<remoteBin> serve` over an exec
-// session, returning a pipe (its stdio) suitable for a yamux client. This is
-// D1's "native x/crypto/ssh" path: we reuse Source's existing sshd rather than
-// running our own daemon port.
+// dialSSH dispatches to the configured transport. "system" (default) shells out
+// to the real `ssh` binary so ~/.ssh/config applies; "native" uses the Go ssh
+// client.
 func dialSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
+	if cfg.Source.SSHMode == "native" {
+		return dialNativeSSH(cfg, remoteBin)
+	}
+	return dialSystemSSH(cfg, remoteBin)
+}
+
+// dialNativeSSH connects with the built-in Go ssh client (ignores ~/.ssh/config).
+func dialNativeSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 	auths, err := authMethods()
 	if err != nil {
 		return nil, err
@@ -43,13 +51,21 @@ func dialSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Tolerate a host written as "user@host" (a common mistake): split it so we
+	// don't try to DNS-resolve the whole string.
+	host := cfg.Source.Host
+	user := cfg.Source.User
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		user = host[:at]
+		host = host[at+1:]
+	}
 	clientCfg := &ssh.ClientConfig{
-		User:            cfg.Source.User,
+		User:            user,
 		Auth:            auths,
 		HostKeyCallback: hostKeyCb,
 		Timeout:         15 * time.Second,
 	}
-	addr := net.JoinHostPort(cfg.Source.Host, fmt.Sprintf("%d", cfg.Source.Port))
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", cfg.Source.Port))
 	client, err := ssh.Dial("tcp", addr, clientCfg)
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
@@ -81,10 +97,65 @@ func dialSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 		return nil, fmt.Errorf("start remote agent: %w", err)
 	}
 	return &sshConn{
-		client:  client,
-		session: session,
-		pipe:    &rwc{r: stdout, w: stdin, c: nil},
+		pipe: &rwc{r: stdout, w: stdin, c: nil},
+		closer: func() error {
+			_ = session.Close()
+			return client.Close()
+		},
 	}, nil
+}
+
+// dialSystemSSH spawns the real `ssh` binary running `<remoteBin> serve` on
+// Source, using its stdio as the yamux transport. Because it's the system ssh,
+// it honors ~/.ssh/config entirely: Host aliases, ProxyJump/bastions,
+// ControlMaster (so Duo/2FA isn't re-prompted), IdentityFile, known_hosts.
+func dialSystemSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
+	target := cfg.Source.Host
+	if cfg.Source.User != "" && !strings.Contains(target, "@") {
+		target = cfg.Source.User + "@" + target
+	}
+	args := []string{"-T"} // no pseudo-tty: we want a clean binary pipe
+	if cfg.Source.Port != 0 && cfg.Source.Port != 22 {
+		args = append(args, "-p", strconv.Itoa(cfg.Source.Port))
+	}
+	remoteCmd := fmt.Sprintf("%s serve --remote-root %s", remoteBin, shellQuote(cfg.Source.RemoteRoot))
+	args = append(args, target, remoteCmd)
+
+	cmd := exec.Command("ssh", args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	// Route ssh's own stderr (connection errors, occasional prompts) to the lg
+	// log file rather than the terminal, so failures don't spam the shell. With
+	// a ControlMaster already established (the common setup), no prompt occurs.
+	if lf, ferr := os.OpenFile(config.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
+		cmd.Stderr = lf
+	} else {
+		cmd.Stderr = os.Stderr
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("spawn ssh: %w", err)
+	}
+	return &sshConn{
+		pipe: &rwc{r: stdout, w: stdin, c: nil},
+		closer: func() error {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+			return nil
+		},
+	}, nil
+}
+
+// shellQuote single-quotes a string for safe embedding in the remote ssh command.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func authMethods() ([]ssh.AuthMethod, error) {

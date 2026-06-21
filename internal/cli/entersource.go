@@ -35,6 +35,7 @@ func newEnterSourceCmd() *cobra.Command {
 			if project == "" {
 				project = projectID(cfg)
 			}
+			routeLogsToFile(cfg) // keep reconnect noise out of the terminal
 
 			client := newClient(cfg)
 			defer client.Close()
