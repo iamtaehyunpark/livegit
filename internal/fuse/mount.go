@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
@@ -15,9 +16,10 @@ import (
 // until unmount. Requires a FUSE implementation present (macFUSE on darwin,
 // libfuse on linux); mounting fails clearly if absent.
 type Mount struct {
-	server  *gofuse.Server
-	backend *Backend
-	cancel  context.CancelFunc
+	server     *gofuse.Server
+	backend    *Backend
+	cancel     context.CancelFunc
+	mountpoint string
 }
 
 // NewMount creates the mount but does not block.
@@ -41,7 +43,7 @@ func NewMount(mountpoint string, b *Backend) (*Mount, error) {
 	go b.RunEviction(ctx)
 
 	logx.For("fuse").Info("mounted", "mountpoint", mountpoint)
-	return &Mount{server: server, backend: b, cancel: cancel}, nil
+	return &Mount{server: server, backend: b, cancel: cancel, mountpoint: mountpoint}, nil
 }
 
 // Wait blocks until the filesystem is unmounted.
@@ -49,7 +51,20 @@ func (m *Mount) Wait() { m.server.Wait() }
 
 // Unmount tears down the mount and stops workers.
 func (m *Mount) Unmount() error {
+	logx.For("fuse").Info("unmount requested", "mountpoint", m.mountpoint)
 	m.cancel()
 	m.backend.Stop()
-	return m.server.Unmount()
+	err := m.server.Unmount()
+	// go-fuse's Unmount can return while the unmount is still in-flight; the
+	// serving goroutines then die with the process before the kernel completes
+	// it, orphaning the mount. Wait briefly for the clean unmount to take, then
+	// force-unmount as a backstop so we never leave a stale mount on exit.
+	for i := 0; i < 20; i++ {
+		if !IsMounted(m.mountpoint) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	logx.For("fuse").Warn("clean unmount didn't take; forcing", "mountpoint", m.mountpoint, "err", err)
+	return ForceUnmount(m.mountpoint)
 }

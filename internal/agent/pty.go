@@ -33,6 +33,7 @@ type ptySession struct {
 	name string
 	cols uint16
 	rows uint16
+	term string   // Ghost's $TERM, needed for tmux attach to init the terminal
 	pt   *os.File // pty master; set once the data stream attaches; guarded by hub.mu
 }
 
@@ -51,8 +52,12 @@ func (h *ptyHub) serveControl(stream io.ReadWriteCloser) {
 				return 0, nil, true, err
 			}
 			sessName = name
+			term := req.Term
+			if term == "" {
+				term = "xterm-256color"
+			}
 			h.mu.Lock()
-			h.wait[name] = &ptySession{name: name, cols: req.Cols, rows: req.Rows}
+			h.wait[name] = &ptySession{name: name, cols: req.Cols, rows: req.Rows, term: term}
 			h.mu.Unlock()
 			return proto.TypeSessionResp, proto.SessionResp{Name: name, Created: created}, true, nil
 		case proto.TypeResize:
@@ -94,6 +99,9 @@ func (h *ptyHub) serveData(stream io.ReadWriteCloser) {
 	}
 
 	cmd := h.tmux.attachCmd(token)
+	// tmux's attach client needs a valid TERM (with terminfo on Source) or it
+	// fails with "open terminal failed: terminal does not support clear".
+	cmd.Env = append(os.Environ(), "TERM="+s.term)
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		log.Error("pty start failed", "err", err)

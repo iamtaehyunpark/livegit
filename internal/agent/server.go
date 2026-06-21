@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"github.com/hashicorp/yamux"
@@ -29,7 +31,11 @@ func NewServer(remoteRoot string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	tmuxSock := filepath.Join(config.Dir(), "tmux.sock")
+	// The tmux server socket MUST live on a local filesystem. Source home dirs
+	// are often NFS/AFS (e.g. CS lab machines), where Unix-domain sockets don't
+	// work — tmux's `new-session -d` appears to succeed but the server can't
+	// persist. Use a per-uid socket under the local temp dir instead of ~/.lg.
+	tmuxSock := filepath.Join(os.TempDir(), fmt.Sprintf("lg-tmux-%d.sock", os.Getuid()))
 	return &Server{
 		remoteRoot: remoteRoot,
 		matcher:    matcher,

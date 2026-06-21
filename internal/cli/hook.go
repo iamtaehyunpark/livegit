@@ -38,14 +38,16 @@ func newHookCheckCmd() *cobra.Command {
 			mapper := config.NewPathMapper(cfg)
 			relDir := relDirOf(mapper, cwd)
 
-			presence := func(relDir, marker string) bool {
-				// Marker is "present on Ghost" if it exists in the local mount.
-				p := mapper.RelToLocal(config.Rel(relDir + "/" + marker))
-				_, err := os.Stat(p)
-				return err == nil
-			}
+			// Directory-marker auto-triggering is disabled (presence=nil). The
+			// rule "marker absent on Ghost but present on Source" can't be
+			// evaluated correctly from the hook: markers like .venv are ignored
+			// (never materialized locally), so "absent on Ghost" is ALWAYS true,
+			// which made nearly every non-readonly command flip to SOURCE — even
+			// outside the mount. Doing it right needs a Source-side presence
+			// check; until then we rely on the explicit, reliable triggers
+			// (conda/venv/poetry/pyenv activation, always_source patterns).
 			readonly := router.Classify(command) == shell.ClassReadonly
-			d := engine.Evaluate(command, relDir, readonly, presence)
+			d := engine.Evaluate(command, relDir, readonly, nil)
 			if d.Enter {
 				fmt.Fprintf(os.Stdout, "ENTER %s\n", d.Via)
 			}

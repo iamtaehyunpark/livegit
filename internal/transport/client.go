@@ -222,11 +222,12 @@ func (c *Client) Close() error {
 	c.cancel()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var err error
+	if c.conn != nil {
+		err = c.conn.Close()
+	}
 	if c.sess != nil {
 		_ = c.sess.Close()
 	}
-	if c.conn != nil {
-		return c.conn.Close()
-	}
-	return nil
+	return err
 }

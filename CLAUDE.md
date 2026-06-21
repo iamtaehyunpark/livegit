@@ -99,6 +99,48 @@ ssh -o BatchMode=yes galaxy-04 '/home/tpark45/.local/bin/lg --version'
 If no master is live, do NOT auto-connect — ask the user to bring one up (their
 shell login automation does), because the first connect needs a Duo push.
 
+### Verified end-to-end against galaxy (2026-06-21)
+
+All core workflows were tested live against galaxy-04 and pass: browse + lazy
+read (ghost→cached), write-through (local edit → galaxy), reverse propagation
+(galaxy edit → mount), and SOURCE mode (auto-trigger → bridge to a tmux session
+on the A100 box → detach → session persists). LOCAL commands stay local; `exit`
+unmounts cleanly.
+
+Real bugs this live testing found and fixed (none were caught by unit tests):
+- tmux socket must be on LOCAL disk, not `~/.lg` — lab homes are **AFS/NFS** and
+  Unix sockets fail there ("new-session -d" succeeds but no server persists).
+  Agent now uses `/tmp/lg-tmux-<uid>.sock`.
+- Forward Ghost's `$TERM` to the agent or `tmux attach` dies with "open terminal
+  failed: terminal does not support clear".
+- `lg shell` could leave a stale mount on exit (signal skips the defer). Now it
+  also unmounts on SIGHUP/SIGTERM and force-unmounts as a backstop.
+- Directory-marker triggers fired for nearly every command (the "absent on
+  Ghost" half is always true for ignored markers). Disabled until a Source-side
+  presence check exists; explicit patterns (conda/venv/poetry/python) are the
+  reliable path.
+
+### How to drive the interactive shell head-less (the test harness)
+
+Run `lg shell` inside an isolated tmux server and send keys / capture the pane:
+
+```sh
+tmux -L lgtest new-session -d -s s -x 200 -y 50
+tmux -L lgtest send-keys -t s 'SHELL=/bin/bash lg shell' Enter   # see note below
+tmux -L lgtest send-keys -t s 'cat README.md' Enter
+tmux -L lgtest capture-pane -t s -p | tail -20
+```
+
+IMPORTANT: launch with `SHELL=/bin/bash`. The user's `~/.zshrc` runs a
+galaxy-01..05 Duo/ControlMaster automation on every interactive zsh; `lg shell`
+sources it, which blocks and can push Duo. bash uses lg's own `--rcfile`
+(no zsh automation). The FUSE mount/sync is shell-agnostic, so you test the same
+behavior. To send a detach (Ctrl-b d) to the REMOTE tmux through the bridge,
+`send-keys` injects directly into the pane: `send-keys -t s C-b` then `d`.
+
+Always clean up after: `pkill -9 -f 'lg shell'; umount -f <local_root>;
+ssh galaxy-04 'pkill -f "lg serve"; tmux -S /tmp/lg-tmux-$(id -u).sock kill-server'`.
+
 ### What you can and can't test non-interactively
 
 - ✅ `go test ./...` — all logic incl. a real yamux Ghost<->Source over net.Pipe.

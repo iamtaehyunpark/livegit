@@ -139,6 +139,7 @@ type SessionReq struct {
 	TabID   string
 	Cols    uint16
 	Rows    uint16
+	Term    string // Ghost's $TERM, so the remote tmux client can init the terminal
 }
 type SessionResp struct {
 	Name    string

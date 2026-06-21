@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/taehyun/lg/internal/config"
@@ -77,7 +80,20 @@ func runShell() error {
 	if err != nil {
 		return fmt.Errorf("mount failed: %w", err)
 	}
-	defer mount.Unmount()
+	// Unmount on normal return AND on termination signals. When lg shell runs a
+	// child shell in a terminal, exiting can deliver SIGHUP/SIGTERM that would
+	// otherwise skip the defer and orphan the mount. unmountOnce guards against
+	// running it twice.
+	var unmountOnce sync.Once
+	cleanup := func() { unmountOnce.Do(func() { _ = mount.Unmount() }) }
+	defer cleanup()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cleanup()
+		os.Exit(0)
+	}()
 
 	if _, _, err := shell.InstallIntegration(); err != nil {
 		return err

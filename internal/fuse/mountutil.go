@@ -4,11 +4,25 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"syscall"
 
 	"github.com/taehyun/lg/internal/logx"
 )
+
+// IsMounted reports whether path is a mount point (its device differs from its
+// parent's). Used to confirm an unmount actually took effect.
+func IsMounted(path string) bool {
+	var st, parent syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		return false
+	}
+	if err := syscall.Stat(filepath.Dir(path), &parent); err != nil {
+		return false
+	}
+	return st.Dev != parent.Dev
+}
 
 // IsStaleMount reports whether path is a FUSE mount whose server has died,
 // leaving the mount orphaned. Touching such a path fails with ENXIO ("device

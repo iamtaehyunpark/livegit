@@ -35,8 +35,12 @@ func Bridge(client *transport.Client, project, tabID, initialInput string) (stri
 
 	cols, rows := terminalSize()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	termEnv := os.Getenv("TERM")
+	if termEnv == "" {
+		termEnv = "xterm-256color"
+	}
 	resp, err := ctl.Call(ctx, proto.TypeSessionReq, proto.SessionReq{
-		Project: project, TabID: tabID, Cols: cols, Rows: rows,
+		Project: project, TabID: tabID, Cols: cols, Rows: rows, Term: termEnv,
 	})
 	cancel()
 	if err != nil {

@@ -55,6 +55,8 @@ func fillAttr(out *gofuse.Attr, a Attr) {
 		out.Atime = uint64(a.ModTime)
 		out.Ctime = uint64(a.ModTime)
 	}
+	out.Uid = uint32(os.Getuid())
+	out.Gid = uint32(os.Getgid())
 }
 
 func (n *lgNode) Getattr(ctx context.Context, fh fs.FileHandle, out *gofuse.AttrOut) syscall.Errno {
