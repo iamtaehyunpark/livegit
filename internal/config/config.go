@@ -80,8 +80,28 @@ func CacheDir() string { return filepath.Join(Dir(), "cache") }
 // ConflictsPath records detected conflicts for `lg status` (§4.4).
 func ConflictsPath() string { return filepath.Join(Dir(), "conflicts.log") }
 
+// Exists reports whether a config file is present at the default path.
+func Exists() bool {
+	_, err := os.Stat(Path())
+	return err == nil
+}
+
+// ErrNotSetUp is returned when no config exists yet, with a friendly hint.
+var ErrNotSetUp = errNotSetUp{}
+
+type errNotSetUp struct{}
+
+func (errNotSetUp) Error() string {
+	return "lg isn't set up yet — run 'lg init' to get started"
+}
+
 // Load reads and validates the config at the default path.
-func Load() (*Config, error) { return LoadFrom(Path()) }
+func Load() (*Config, error) {
+	if !Exists() {
+		return nil, ErrNotSetUp
+	}
+	return LoadFrom(Path())
+}
 
 // LoadFrom reads and validates a config at an explicit path.
 func LoadFrom(path string) (*Config, error) {

@@ -77,21 +77,43 @@ This is what lets your laptop *show* Source's files.
 
 ### 4. Initialize
 
-On the laptop:
+On the laptop, just run:
 
 ```sh
-lg init --role ghost \
-  --host gpu-1 \
-  --remote-root /home/you/projects/myrepo \
-  --local-root ~/myrepo
+lg init
 ```
 
-- `--host` — your SSH host/alias for Source.
-- `--remote-root` — where the repo actually lives on Source.
-- `--local-root` — the empty folder on your laptop where it'll appear.
+It walks you through it, step by step — no flags to remember:
 
-This writes `~/.lg/config.yaml`. You can hand-edit it anytime (see the cheat
-sheet at the bottom).
+```
+👋 Welcome to lg! Let's set things up. (press Enter to accept [defaults])
+
+Is this machine your laptop (ghost) or the server (source)? (ghost/source) [ghost]:
+Now the server (Source) you'll connect to:
+  SSH host or alias (e.g. gpu-1 or user@1.2.3.4): gpu-1
+  Absolute repo path on the server: /home/you/projects/myrepo
+  SSH user [you]:
+  SSH port [22]:
+And where on this laptop should the project appear?
+  Local mount point [/Users/you/myrepo]:
+
+Here's what I'll write:
+  role:        ghost
+  server:      you@gpu-1
+  remote repo: /home/you/projects/myrepo
+  local mount: /Users/you/myrepo
+Write this config? [Y/n]:
+```
+
+Press Enter to accept the bracketed defaults; type to override. It shows you a
+summary and asks before writing anything.
+
+> Just type `lg` on a fresh machine and it'll point you here. Prefer one line?
+> `lg init --role ghost --host gpu-1 --remote-root /home/you/myrepo --local-root ~/myrepo`
+> skips the prompts (handy for scripts).
+
+This writes `~/.lg/config.yaml`. Change any setting later with
+`lg config set …` (see "Changing settings" below) — no need to re-run `lg init`.
 
 ---
 
@@ -231,6 +253,23 @@ in `source_triggers`. You can always force it with `python ...` (matches
 `always_source_patterns`) or just run the command after activating a venv.
 
 ---
+
+## Changing settings
+
+Two ways — both safe, no daemon to restart (config is read fresh each run):
+
+```sh
+lg config set source.host gpu-2        # change one setting, leaves the rest intact
+lg config get source.host              # print one setting
+lg config edit                         # open the whole file in $EDITOR
+lg config show                         # dump the current config
+```
+
+`lg config set` validates before saving, so a typo can't break your config.
+For list-valued settings (ignore patterns, triggers) use `lg config edit`.
+
+> Don't re-run `lg init` just to change a field — it rewrites the whole file
+> back to defaults.
 
 ## Config cheat sheet (`~/.lg/config.yaml`)
 

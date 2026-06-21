@@ -58,9 +58,19 @@ make release          # cross-compile static binaries for all platforms -> ./dis
 # automatically by Ghost over ssh.
 
 # On Ghost (laptop):
-lg init --role ghost --host gpu-1 --remote-root /home/u/proj --local-root ~/proj
-lg shell        # mounts ~/proj, drops you into your shell with lg integration
+lg init          # interactive, step-by-step setup (just answer the prompts)
+lg shell         # mounts your repo, drops you into your shell with lg integration
 ```
+
+`lg init` walks you through role, SSH host, remote repo path, and local mount
+point, with sensible defaults and a confirmation summary before it writes
+anything. To skip the prompts (e.g. in a script), pass them as flags instead:
+
+```sh
+lg init --role ghost --host gpu-1 --remote-root /home/u/proj --local-root ~/proj
+```
+
+On a fresh machine, just typing `lg` greets you and points you to `lg init`.
 
 Inside the shell:
 - `conda activate ml` / `source .venv/bin/activate` / `python train.py` →
@@ -69,6 +79,7 @@ Inside the shell:
 - `lg status` — mode, file states, cache usage, journal backlog, conflicts.
 - `lg sessions` — remote tmux sessions lg created.
 - `lg local` — force back to LOCAL mode (escape hatch).
+- `lg config set source.host gpu-2` — change a setting (also `get`/`edit`/`show`).
 
 ## Architecture (maps to the spec)
 
