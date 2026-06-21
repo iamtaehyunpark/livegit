@@ -22,13 +22,25 @@ PLATFORMS   := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 build:
 	@mkdir -p bin
 	$(GOBUILD) -o bin/$(BINARY) $(PKG)
+	@# On macOS, re-sign with a full ad-hoc signature. The linker's adhoc
+	@# signature plus stripping can yield "Code Signature Invalid" SIGKILLs;
+	@# an explicit codesign produces a robust, page-hash-consistent signature.
+	@if [ "$$(uname)" = "Darwin" ]; then codesign --force --sign - bin/$(BINARY) >/dev/null 2>&1 || true; fi
 	@echo "built bin/$(BINARY) ($(VERSION))"
 
-## install: build and copy to $(BINDIR) (defaults to ~/.local/bin)
+## install: build and atomically place at $(BINDIR) (defaults to ~/.local/bin)
 install: build
 	@mkdir -p $(BINDIR)
-	@cp bin/$(BINARY) $(BINDIR)/$(BINARY)
-	@echo "installed $(BINDIR)/$(BINARY)"
+	@# Atomic install in a SINGLE shell so the temp name is consistent: copy to
+	@# a temp file in the same dir, then rename. The rename gives the new binary
+	@# a fresh inode instead of overwriting in place — overwriting a running or
+	@# page-cached binary causes "Invalid Page" code-signature SIGKILLs on
+	@# Apple Silicon (the exact failure we hit).
+	@tmp="$(BINDIR)/.$(BINARY).new.$$$$"; \
+	  cp bin/$(BINARY) "$$tmp" && chmod +x "$$tmp" && \
+	  { [ "$$(uname)" = "Darwin" ] && xattr -c "$$tmp" 2>/dev/null || true; } && \
+	  mv -f "$$tmp" "$(BINDIR)/$(BINARY)" && \
+	  echo "installed $(BINDIR)/$(BINARY)"
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; \
 	  *) echo "NOTE: $(BINDIR) is not on your PATH — add: export PATH=\"$(BINDIR):\$$PATH\"";; esac
 

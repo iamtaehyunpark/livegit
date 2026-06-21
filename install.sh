@@ -28,12 +28,21 @@ url="https://github.com/${REPO}/releases/latest/download/${asset}"
 
 echo "downloading ${asset} ..."
 mkdir -p "$BINDIR"
+tmp="$BINDIR/.lg.new.$$"
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$url" -o "$BINDIR/lg"
+  curl -fsSL "$url" -o "$tmp"
 else
-  wget -qO "$BINDIR/lg" "$url"
+  wget -qO "$tmp" "$url"
 fi
-chmod +x "$BINDIR/lg"
+chmod +x "$tmp"
+if [ "$os" = "darwin" ]; then
+  # Clear quarantine and apply a robust ad-hoc signature so macOS doesn't
+  # SIGKILL it as "Code Signature Invalid".
+  xattr -c "$tmp" 2>/dev/null || true
+  codesign --force --sign - "$tmp" >/dev/null 2>&1 || true
+fi
+# Atomic rename (fresh inode) — never overwrite the binary in place.
+mv -f "$tmp" "$BINDIR/lg"
 
 echo "installed $BINDIR/lg"
 case ":$PATH:" in
