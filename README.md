@@ -8,16 +8,48 @@ and a **Source** device (GPU server). Implements the v0.2 spec.
   remote tmux session on Source.
 - Local disk only holds what's actually opened (ghost → cached → evicted, LRU).
 
-## Build
+## Install
+
+`lg` is a single self-contained native binary. **You do not need Go (or any
+compiler) to run it** — only to build it from source. Once installed it behaves
+like any other CLI (`rg`, `fzf`, `gh`): you just type `lg`.
+
+**Option 1 — one-line installer (prebuilt binary, no Go):**
 
 ```sh
-go build ./...
-go build -o lg ./cmd/lg
-go test ./...        # all pure logic + an in-memory Ghost↔Source integration test
+curl -fsSL https://raw.githubusercontent.com/iamtaehyunpark/livegit/main/install.sh | sh
 ```
 
-Requires Go ≥ 1.24. Runtime extras: `tmux` on Source; a FUSE implementation on
-Ghost (macFUSE on macOS, libfuse on Linux) for the actual mount.
+**Option 2 — Homebrew (via a tap):**
+
+```sh
+brew tap iamtaehyunpark/livegit
+brew install lg
+```
+
+(see `Formula/lg.rb` for publishing the tap)
+
+**Option 3 — build from source (needs Go ≥ 1.24, once):**
+
+```sh
+make install          # builds a static binary -> ~/.local/bin/lg
+# or pick a location:
+make install PREFIX=/usr/local
+```
+
+After install, `lg` runs standalone — Go can be uninstalled and it still works.
+
+Runtime extras: `tmux` on Source; a FUSE implementation on Ghost (macFUSE on
+macOS, libfuse on Linux) for the actual mount.
+
+## Build & test from source
+
+```sh
+make build            # -> ./bin/lg
+make test             # pure logic + in-memory Ghost↔Source integration test
+make vet
+make release          # cross-compile static binaries for all platforms -> ./dist
+```
 
 ## Quick start
 

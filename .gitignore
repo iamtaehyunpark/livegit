@@ -1,4 +1,6 @@
-# Built binary
+# Build artifacts
 /lg
+/bin/
+/dist/
 # Local lg state (if a developer runs it in-tree)
 /.lg/

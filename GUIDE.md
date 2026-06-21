@@ -32,17 +32,28 @@ when to be remote.
 
 ## Setup (once)
 
-### 1. Put `lg` on both machines
+### 1. Install `lg` on both machines
 
-Build it (needs Go 1.24+):
+`lg` is a single self-contained binary — **no Go, no compiler, nothing to run
+it with.** You just put it on your `PATH`, like `rg` or `gh`. Pick one:
 
 ```sh
-go build -o lg ./cmd/lg
+# easiest — one-line installer (downloads the prebuilt binary)
+curl -fsSL https://raw.githubusercontent.com/iamtaehyunpark/livegit/main/install.sh | sh
+
+# or Homebrew
+brew tap iamtaehyunpark/livegit && brew install lg
+
+# or build once from source (the only path that needs Go)
+make install
 ```
 
-Copy the `lg` binary onto **Source** somewhere on your `PATH` (e.g.
-`/usr/local/bin/lg`). You don't start anything on Source by hand — your laptop
-launches the Source side over SSH automatically.
+Do this on your **laptop (Ghost)** and once on **Source** (drop the matching
+binary somewhere on Source's `PATH`, e.g. `~/.local/bin/lg`). You never start
+anything on Source by hand — your laptop launches the Source side over SSH
+automatically.
+
+> Already have it? `lg --version` confirms it's installed and on your PATH.
 
 ### 2. Make sure plain SSH already works
 
