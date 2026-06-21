@@ -30,6 +30,28 @@ func runShell() error {
 	if err != nil {
 		return err
 	}
+
+	// A previous `lg shell` killed without unmounting leaves a stale FUSE mount
+	// here; reading anything under local_root would then fail with ENXIO. Clear
+	// it before we touch the path (e.g. to read .lgignore).
+	if recovered, rerr := fuse.RecoverStaleMount(c.LocalRoot); rerr != nil {
+		return fmt.Errorf("a stale mount at %s couldn't be cleared automatically.\n"+
+			"Run:  lg unmount   (or: umount -f %q)\nthen try again. (%v)",
+			c.LocalRoot, c.LocalRoot, rerr)
+	} else if recovered {
+		fmt.Fprintf(os.Stderr, "lg: cleaned up a stale mount at %s\n", c.LocalRoot)
+	}
+
+	// Mounting over a populated directory hides those files while active. Warn
+	// loudly — local_root is meant to be an empty mount point.
+	if fuse.IsNonEmptyDir(c.LocalRoot) {
+		fmt.Fprintf(os.Stderr,
+			"lg: warning: %s is not empty — its files will be hidden while lg is mounted.\n"+
+				"     local_root should be an empty mount point. Change it with:\n"+
+				"       lg config set local_root ~/some-empty-dir\n",
+			c.LocalRoot)
+	}
+
 	matcher, err := buildMatcher(c)
 	if err != nil {
 		return err
