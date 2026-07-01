@@ -31,7 +31,7 @@ func NewRoot() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !config.Exists() {
 				fmt.Fprintln(cmd.OutOrStdout(),
-					"👋 Welcome to lg!\n\nIt looks like this is your first time. Run:\n\n    lg init\n\nto set things up (it'll walk you through it).")
+					"👋 Welcome to lg!\n\nlg is project-local. cd into the project you want to work on and run:\n\n    lg init\n\nto set it up (it writes ./.lg/config.yaml and walks you through it).")
 				return nil
 			}
 			return cmd.Help()
@@ -46,11 +46,39 @@ func NewRoot() *cobra.Command {
 		newServeCmd(),
 		newShellCmd(),
 		newUnmountCmd(),
+		newRunCmd(),
+		newToggleCmd(),
 		newLocalCmd(),
 		newStatusCmd(),
-		newSessionsCmd(),
-		newEnterSourceCmd(),
 		newHookCmd(),
 	)
 	return root
+}
+
+// IsKnownSubcommand reports whether name matches a registered subcommand (or a
+// built-in like help/completion) of root. Used by the bare-command passthrough
+// in main: `lg <anything-else>` runs <anything-else> on Source (§1.1).
+func IsKnownSubcommand(root *cobra.Command, name string) bool {
+	switch name {
+	case "help", "completion", "__complete", "__completeNoDesc":
+		return true
+	}
+	for _, c := range root.Commands() {
+		if c.Name() == name {
+			return true
+		}
+		for _, a := range c.Aliases {
+			if a == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// RunPassthrough executes argv as a remote command and returns its exit code.
+// main calls this when the first arg is not a known subcommand or flag.
+func RunPassthrough(argv []string) int {
+	logx.Init(logLevel, nil)
+	return runRemote(argv, false) // explicit `lg <cmd>`: strict remote, no local fallback
 }

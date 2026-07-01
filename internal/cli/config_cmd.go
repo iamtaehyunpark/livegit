@@ -42,10 +42,10 @@ func configFields(c *config.Config) map[string]field {
 		"source.port":                    {func(c *config.Config) string { return strconv.Itoa(c.Source.Port) }, setInt(&c.Source.Port)},
 		"source.agent_bin":               {func(c *config.Config) string { return c.Source.AgentBin }, func(c *config.Config, v string) error { c.Source.AgentBin = v; return nil }},
 		"source.ssh_mode":                {func(c *config.Config) string { return c.Source.SSHMode }, func(c *config.Config, v string) error { c.Source.SSHMode = v; return nil }},
+		"source.auth":                    {func(c *config.Config) string { return c.Source.Auth }, func(c *config.Config, v string) error { c.Source.Auth = v; return nil }},
 		"local_root":                     {func(c *config.Config) string { return c.LocalRoot }, func(c *config.Config, v string) error { c.LocalRoot = v; return nil }},
 		"cache.evict_after_idle_minutes": {func(c *config.Config) string { return strconv.Itoa(c.Cache.EvictAfterIdleMinutes) }, setInt(&c.Cache.EvictAfterIdleMinutes)},
 		"cache.max_cache_size_gb":        {func(c *config.Config) string { return strconv.Itoa(c.Cache.MaxCacheSizeGB) }, setInt(&c.Cache.MaxCacheSizeGB)},
-		"offline.on_source_trigger":      {func(c *config.Config) string { return c.Offline.OnSourceTrigger }, func(c *config.Config, v string) error { c.Offline.OnSourceTrigger = v; return nil }},
 		"default_target":                 {func(c *config.Config) string { return c.DefaultTarget }, func(c *config.Config, v string) error { c.DefaultTarget = v; return nil }},
 		"log_level":                      {func(c *config.Config) string { return c.LogLevel }, func(c *config.Config, v string) error { c.LogLevel = v; return nil }},
 	}
@@ -167,8 +167,11 @@ func newConfigShowCmd() *cobra.Command {
 func newConfigPathCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "path",
-		Short: "Print the config file path",
+		Short: "Print the active project's config file path",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !config.Exists() {
+				return config.ErrNotSetUp
+			}
 			fmt.Println(config.Path())
 			return nil
 		},

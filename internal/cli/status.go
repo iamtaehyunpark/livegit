@@ -2,19 +2,18 @@ package cli
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/fuse"
+	"github.com/taehyun/lg/internal/shell"
 )
 
 func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show mode, sync state, cache usage, and conflicts",
+		Short: "Show connection, toggle mode, cache usage, and pending writes",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := config.Load()
 			if err != nil {
@@ -26,22 +25,25 @@ func newStatusCmd() *cobra.Command {
 				fmt.Printf("source:      %s:%s\n", c.Source.Host, c.Source.RemoteRoot)
 			}
 
-			// Per-tab mode (if invoked inside an lg shell).
+			// Toggle mode (if invoked inside an lg shell).
 			if tab := os.Getenv("LG_TAB_ID"); tab != "" {
-				st := shellLoadState(tab)
-				fmt.Printf("mode:        %s", st.mode)
-				if st.via != "" {
-					fmt.Printf(" (via %s)", st.via)
+				if shell.ToggleOn(tab) {
+					fmt.Println("toggle:      ON (commands run on Source)")
+				} else {
+					fmt.Println("toggle:      off (commands run locally)")
 				}
-				fmt.Println()
 			}
 
-			// File-state counts + cache usage from the state DB.
-			if store, err := fuse.OpenState(config.StateDBPath()); err == nil {
-				defer store.Close()
-				g, ca, li, _ := store.Counts()
-				used, _ := store.CachedSizeBytes()
-				fmt.Printf("files:       %d ghost, %d cached, %d live\n", g, ca, li)
+			// Full-tree snapshot freshness.
+			if info, err := os.Stat(treeSnapshotPath()); err == nil {
+				fmt.Printf("tree:        %d entries cached, synced %s\n",
+					countSnapshotEntries(), info.ModTime().Format("2006-01-02 15:04:05"))
+			} else {
+				fmt.Println("tree:        not synced yet")
+			}
+
+			// On-disk content cache size.
+			if used := cacheBytes(); used >= 0 {
 				fmt.Printf("cache used:  %.1f MB / %d GB\n",
 					float64(used)/(1<<20), c.Cache.MaxCacheSizeGB)
 			}
@@ -50,24 +52,73 @@ func newStatusCmd() *cobra.Command {
 			if pending, err := countPending(); err == nil {
 				fmt.Printf("journal:     %d pending write(s)\n", pending)
 			}
-
-			// Conflicts.
-			conflicts := readConflicts()
-			if len(conflicts) == 0 {
-				fmt.Println("conflicts:   none")
-			} else {
-				fmt.Printf("conflicts:   %d\n", len(conflicts))
-				for _, c := range conflicts {
-					fmt.Printf("  - %s", c.Rel)
-					if c.BackupRel != "" {
-						fmt.Printf(" (backup: %s)", c.BackupRel)
-					}
-					fmt.Println()
-				}
-			}
 			return nil
 		},
 	}
+}
+
+func treeSnapshotPath() string { return config.Dir() + "/tree.json" }
+
+func countSnapshotEntries() int {
+	b, err := os.ReadFile(treeSnapshotPath())
+	if err != nil {
+		return 0
+	}
+	// Entries are a JSON array; count is cheap enough via the decoder.
+	n := 0
+	depth := 0
+	for _, r := range b {
+		switch r {
+		case '{':
+			if depth == 1 {
+				n++
+			}
+			depth++
+		case '[':
+			depth++
+		case '}':
+			depth--
+		case ']':
+			depth--
+		}
+	}
+	return n
+}
+
+func cacheBytes() int64 {
+	var total int64 = -1
+	dir := config.CacheDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return total
+	}
+	total = 0
+	var walk func(string)
+	walk = func(p string) {
+		es, err := os.ReadDir(p)
+		if err != nil {
+			return
+		}
+		for _, e := range es {
+			fp := p + "/" + e.Name()
+			if e.IsDir() {
+				walk(fp)
+				continue
+			}
+			if info, err := e.Info(); err == nil {
+				total += info.Size()
+			}
+		}
+	}
+	for _, e := range entries {
+		fp := dir + "/" + e.Name()
+		if e.IsDir() {
+			walk(fp)
+		} else if info, err := e.Info(); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
 }
 
 // countPending counts unflushed journal entries by scanning the journal file.
@@ -89,46 +140,4 @@ func countPending() (int, error) {
 		}
 	}
 	return n, sc.Err()
-}
-
-func readConflicts() []fuse.Conflict {
-	f, err := os.Open(config.ConflictsPath())
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	var out []fuse.Conflict
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if len(sc.Bytes()) == 0 {
-			continue
-		}
-		var c fuse.Conflict
-		if json.Unmarshal(sc.Bytes(), &c) == nil {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// shellLoadState is a thin local view of the per-tab state to avoid importing
-// the shell package just for display fields.
-type tabView struct {
-	mode string
-	via  string
-}
-
-func shellLoadState(tab string) tabView {
-	b, err := os.ReadFile(config.Dir() + "/run/" + tab + ".json")
-	if err != nil {
-		return tabView{mode: "local"}
-	}
-	var raw struct {
-		Mode       string `json:"mode"`
-		EnteredVia string `json:"entered_via"`
-	}
-	if json.Unmarshal(b, &raw) != nil || raw.Mode == "" {
-		return tabView{mode: "local"}
-	}
-	return tabView{mode: raw.Mode, via: raw.EnteredVia}
 }

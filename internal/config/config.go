@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -35,80 +36,130 @@ type Config struct {
 		//     This is what makes lab/bastion/2FA hosts work.
 		//   "native": use the built-in Go ssh client (ignores ~/.ssh/config).
 		SSHMode string `yaml:"ssh_mode"`
+		// Auth selects how to authenticate:
+		//   "" (default): ssh key / agent (system or native ssh).
+		//   "password": use the password stored (encrypted) in .lg/credentials,
+		//     via the built-in Go ssh client. Forces native mode, since the system
+		//     `ssh` binary can't answer a prompt from lg's non-interactive launch.
+		Auth string `yaml:"auth"`
 	} `yaml:"source"`
 
 	LocalRoot string `yaml:"local_root"` // absolute path of the FUSE mount on Ghost
 
 	Ignore []string `yaml:"ignore"` // .gitignore-style patterns (also merged with .lgignore)
 
+	// AutoRemoteCommands are commands that, typed in `lg shell` WITHOUT the `lg`
+	// prefix, auto-run on Source (as if `lg <cmd>`), falling back to the local
+	// command if Source is unreachable. Matched on the first word (basename).
+	// Set to an explicit empty list ([]) to disable; absent uses the default set.
+	AutoRemoteCommands []string `yaml:"auto_remote_commands"`
+
 	Cache struct {
 		EvictAfterIdleMinutes int `yaml:"evict_after_idle_minutes"`
 		MaxCacheSizeGB        int `yaml:"max_cache_size_gb"`
 	} `yaml:"cache"`
 
-	SourceTriggers struct {
-		Patterns             []string          `yaml:"patterns"`
-		ExitCommandMap       map[string]string `yaml:"exit_command_map"`
-		DirectoryMarkers     []string          `yaml:"directory_markers"`
-		AlwaysSourcePatterns []string          `yaml:"always_source_patterns"`
-	} `yaml:"source_triggers"`
-
-	Offline struct {
-		OnSourceTrigger string `yaml:"on_source_trigger"` // "queue" | "error"
-	} `yaml:"offline"`
-
-	ReadonlyCommands []string `yaml:"readonly_commands"`
-
-	// DefaultTarget: where `lg shell` starts. "source" drops you straight into a
-	// persistent tmux session on Source (commands run on the server by default,
-	// with full state/persistence); detaching returns to a LOCAL shell. "local"
-	// (default) starts local and only switches on triggers.
+	// DefaultTarget: where `lg shell` starts. "source" starts with toggle mode on
+	// (every command runs on Source); "local" (default) starts as a normal local
+	// shell. `lg toggle` flips it at any time.
 	DefaultTarget string `yaml:"default_target"`
 
 	LogLevel string `yaml:"log_level"` // debug|info|warn|error (default info)
 }
 
-// Dir returns the lg home directory (~/.lg), honoring $LG_HOME for tests.
+// lg is project-local: config + all per-project state live in a `.lg/` dir at
+// the top of each project (like `.git/`). Commands discover the nearest one by
+// walking up from the current directory. `$LG_HOME` overrides discovery
+// entirely (used by tests and as an escape hatch).
+
+var (
+	dirOnce sync.Once
+	dirVal  string // resolved active .lg dir for this process ("" = no project)
+)
+
+// findProjectDir walks up from start looking for a directory that contains
+// `.lg/config.yaml`, and returns that `.lg` path. Like git's `.git` discovery.
+func findProjectDir(start string) (string, bool) {
+	dir := start
+	for {
+		lg := filepath.Join(dir, ".lg")
+		if st, err := os.Stat(filepath.Join(lg, "config.yaml")); err == nil && !st.IsDir() {
+			return lg, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir { // reached the filesystem root
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// Dir returns the active project's `.lg` directory for this process: `$LG_HOME`
+// if set, else the nearest `.lg/` discovered by walking up from the cwd, else ""
+// (no project here). Resolved once and cached — a single lg invocation has one
+// cwd, and the long-lived `lg shell` keeps the dir it was launched from.
 func Dir() string {
+	// $LG_HOME is read fresh every call (tests set it per-case; never cache it).
 	if h := os.Getenv("LG_HOME"); h != "" {
 		return h
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".lg")
+	// The walk-up discovery is cached: a process has one cwd, and `lg shell`
+	// keeps the directory it was launched from.
+	dirOnce.Do(func() {
+		if cwd, err := os.Getwd(); err == nil {
+			if d, ok := findProjectDir(cwd); ok {
+				dirVal = d
+			}
+		}
+	})
+	return dirVal
 }
 
-// Path returns the default config file path.
+// InitDir returns where `lg init` should create a fresh project's `.lg` dir:
+// `$LG_HOME` if set, else `<cwd>/.lg`. It deliberately bypasses discovery (which
+// would find nothing before init runs).
+func InitDir() string {
+	if h := os.Getenv("LG_HOME"); h != "" {
+		return h
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	return filepath.Join(cwd, ".lg")
+}
+
+// Path returns the active project's config file path.
 func Path() string { return filepath.Join(Dir(), "config.yaml") }
 
-// StateDBPath is the SQLite metadata db (spec §4.1).
-func StateDBPath() string { return filepath.Join(Dir(), "state.db") }
-
-// JournalPath is the append-only write journal (spec §4.5).
+// JournalPath is the append-only write journal.
 func JournalPath() string { return filepath.Join(Dir(), "journal.log") }
 
-// CacheDir holds materialized file content for cached/live files.
+// CacheDir holds materialized (lazily fetched) file content.
 func CacheDir() string { return filepath.Join(Dir(), "cache") }
 
-// ConflictsPath records detected conflicts for `lg status` (§4.4).
-func ConflictsPath() string { return filepath.Join(Dir(), "conflicts.log") }
-
-// LogPath is where long-running commands (shell, enter-source) write their logs,
-// so background reconnect noise never spams the user's terminal.
+// LogPath is where long-running commands (shell, run) write their logs, so
+// background reconnect noise never spams the user's terminal.
 func LogPath() string { return filepath.Join(Dir(), "lg.log") }
 
-// Exists reports whether a config file is present at the default path.
+// Exists reports whether the cwd is inside an lg project (a discoverable `.lg/
+// config.yaml`).
 func Exists() bool {
-	_, err := os.Stat(Path())
+	d := Dir()
+	if d == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(d, "config.yaml"))
 	return err == nil
 }
 
-// ErrNotSetUp is returned when no config exists yet, with a friendly hint.
+// ErrNotSetUp is returned when the cwd is not inside an lg project.
 var ErrNotSetUp = errNotSetUp{}
 
 type errNotSetUp struct{}
 
 func (errNotSetUp) Error() string {
-	return "lg isn't set up yet — run 'lg init' to get started"
+	return "not an lg project — run 'lg init' in your project directory to set one up"
 }
 
 // Load reads and validates the config at the default path.
@@ -155,17 +206,16 @@ func (c *Config) applyDefaults() {
 	if c.Cache.MaxCacheSizeGB == 0 {
 		c.Cache.MaxCacheSizeGB = 10
 	}
-	if c.Offline.OnSourceTrigger == "" {
-		c.Offline.OnSourceTrigger = "queue"
+	if c.AutoRemoteCommands == nil { // nil = absent; explicit [] disables
+		c.AutoRemoteCommands = []string{
+			"ls", "cat", "tree", "head", "tail", "less", "grep", "find", "stat", "wc", "file",
+		}
 	}
 	if c.DefaultTarget == "" {
 		c.DefaultTarget = "local"
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
-	}
-	if len(c.ReadonlyCommands) == 0 {
-		c.ReadonlyCommands = []string{"cat", "head", "tail", "less", "grep", "find", "ls"}
 	}
 }
 
@@ -189,9 +239,6 @@ func (c *Config) Validate() error {
 		if c.Source.RemoteRoot == "" || !filepath.IsAbs(c.Source.RemoteRoot) {
 			return fmt.Errorf("source.remote_root must be an absolute path")
 		}
-	}
-	if c.Offline.OnSourceTrigger != "queue" && c.Offline.OnSourceTrigger != "error" {
-		return fmt.Errorf("offline.on_source_trigger must be 'queue' or 'error'")
 	}
 	return nil
 }

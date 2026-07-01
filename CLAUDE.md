@@ -2,8 +2,19 @@
 
 Live Git (`lg`): real-time codebase sync + remote execution between a **Ghost**
 (laptop) and a **Source** (GPU/lab server). Single Go binary; role decided by
-config. Read `README.md` for the design and `GUIDE.md` for the user-facing flow.
-This file is the operational cheat-sheet for *working on and testing* lg.
+config. This file is the operational cheat-sheet for *working on and testing* lg.
+
+**NOTE (Pivot v1.0):** the product was pivoted to two literal features. The old
+"smart unified shell" (trigger engine, LOCAL/SOURCE mode state machine,
+ghost/cached/live FUSE tri-state, persistent tmux sessions) is **deleted**.
+`README.md`/`GUIDE.md` still describe the old design and are stale — trust this
+file and the code. The two features now are:
+1. **Command runner** — `lg <command>` runs on Source in a PTY, streams output
+   live, forwards Ctrl-C/SIGWINCH, propagates the exit code. `lg toggle` makes
+   every command in the shell go remote until toggled off (no heuristics).
+2. **Full-tree mount** — the entire remote tree's metadata is synced eagerly
+   (OneDrive-style): the whole folder is browsable immediately with real sizes;
+   file content is fetched lazily on open.
 
 ## Build / test / install (exact commands)
 
@@ -37,29 +48,44 @@ only needed to build.
 ## Architecture (where things live)
 
 ```
-cmd/lg/main.go            entrypoint
-internal/config           config.yaml, .lgignore matcher, local<->remote path mapper (§7 shared)
-internal/proto            message schema + length-prefixed framing (D3)
+cmd/lg/main.go            entrypoint; bare-command passthrough (lg <cmd> -> remote run)
+internal/config           config.yaml, .lgignore matcher, local<->remote path mapper (shared)
+internal/proto            message schema + length-prefixed framing (exec, tree, file RPC, invalidate)
 internal/transport        ssh dial (system OR native) + yamux streams + single online flag + reconnect
-internal/agent            Source daemon (lg serve): file server, tmux mgr, PTY bridge, watcher
-internal/fuse             Ghost FUSE: ghost/cached/live state machine, journal-first write-through,
-                          LRU eviction, conflict backup, invalidation, mount lifecycle
-internal/shell            trigger engine, LOCAL/SOURCE state machine, router, PTY bridge, zsh/bash hooks
-internal/cli              cobra commands (init/config/shell/serve/status/sessions/local/unmount/enter-source/hook)
+internal/agent            Source daemon (lg serve): file server, full-tree walk, exec hub (PTY), watcher
+internal/fuse             Ghost FUSE: full-tree metadata Index (+ snapshot), lazy content fetch,
+                          journal write-through (last-write-wins), size-capped cache, mount lifecycle
+internal/shell            command runner (run.go: RunRemote PTY bridge), toggle state, zsh/bash hooks
+internal/cli              cobra commands (init/config/shell/run/toggle/local/serve/status/unmount/hook)
 ```
 
-The FUSE state machine's pure logic is in `internal/fuse/backend.go` and is fully
+The FUSE backend's pure logic is in `internal/fuse/backend.go` + `index.go`,
 tested against a fake Source (`backend_test.go`) — no mount needed. Live mount
-needs **macFUSE** (installed on this machine).
+needs **macFUSE** (installed on this machine). The agent's exec + full-tree RPCs
+have an in-memory end-to-end test in `internal/agent/integration_test.go`.
 
 ## Commands
 
+- `lg <command>` — run it on Source, stream output live (PTY, exit code). Bare
+  passthrough: any first word that isn't a subcommand/flag routes to `lg run`.
+- `lg run -- <command>` — explicit form (use when a command name collides with a
+  subcommand, e.g. `lg run -- status`).
+- `lg toggle` — flip toggle mode for the current shell tab (every command → Source).
+  `lg local` is the explicit "toggle off".
+- **Auto-remote commands**: in `lg shell`, a configurable list (`auto_remote_commands`,
+  default `ls cat tree head tail less grep find stat wc file`) auto-runs on Source —
+  without the `lg` prefix — **when the cwd is inside the mount**, falling back to the
+  local command if Source is unreachable (`lg run --local-fallback`). Matched on the
+  first word (basename, so `/bin/ls` matches `ls`). Escape to local with `\ls` or
+  `command ls`. Set `auto_remote_commands: []` to disable. The zsh `accept-line`
+  widget / bash DEBUG trap (`internal/shell/integration.go`) do the rewrite; the list
+  is baked into the generated hook at `lg shell` start.
 - `lg init` — interactive setup wizard (flags also work; `-i` forces wizard).
 - `lg config get|set|edit|show|path` — change settings safely (validates before save).
-- `lg shell` — mount FUSE + run the user's shell with trigger integration.
+- `lg shell` — mount the full-tree FUSE folder + run the user's shell (toggle hooks).
 - `lg unmount` — clear a leftover/stale FUSE mount.
-- `lg status` / `lg sessions` / `lg local`.
-- `lg serve` — Source-side agent (hidden; launched over ssh by Ghost).
+- `lg status` — connection, toggle on/off, tree-sync freshness, cache, pending writes.
+- `lg serve --remote-root <p> [--ignore <csv>]` — Source agent (hidden; launched over ssh).
 
 ## Two transports (D1 revisited)
 
@@ -71,6 +97,27 @@ needs **macFUSE** (installed on this machine).
 - **`native`**: built-in Go ssh client; ignores `~/.ssh/config`. Needs the host
   key in `~/.ssh/known_hosts`.
 
+### Password auth + agent auto-deploy
+
+`source.auth: password` (forces native mode) uses a password stored **encrypted**
+at `<project>/.lg/credentials` (AES-GCM, key derived from the machine id via
+`ioreg`/`/etc/machine-id` — copying the file to another machine won't decrypt;
+`internal/config/secret.go`). The system-`ssh` path can't answer a prompt from
+lg's non-interactive launch, so password hosts must use native. `authMethods`
+offers both `ssh.Password` and `ssh.KeyboardInteractive` (many servers deliver
+"password" as keyboard-interactive). `lg init --auth password` prompts (hidden,
+never in argv) and stores it.
+
+`lg init` also **confirms/deploys the agent**: `transport.EnsureAgent`
+(`internal/transport/deploy.go`) connects, checks for `lg` on the remote, and if
+missing pipes the matching embedded Linux binary to `~/.local/bin/lg` (no scp/
+sftp — streamed over an ssh session). The Linux agents are embedded via
+`internal/agentbin` (`//go:embed all:data`); `make agents` (run by `make build`)
+cross-compiles them from the same source, so the deployed agent always matches
+this build's protocol. Plain `go build`/`go test` embed nothing (data/ has only
+`.gitkeep`) → deploy degrades to printing a manual `scp` command. `agent_bin`
+stays `"lg"` (resolved by the PATH-prefix in `remoteAgentCmd`).
+
 ## Live test environment (already set up)
 
 The user's real Source is **galaxy-04** (UW–Madison CS). Both sides currently run
@@ -78,12 +125,32 @@ the same build — **keep them in sync** (protocol must match): after changing l
 `make release && scp dist/lg-linux-amd64 galaxy-04:.local/bin/lg`.
 
 ```
-Ghost (this Mac):  ~/.local/bin/lg   local_root=/Users/t/lg/two-stage-stitcher (empty mount point)
+Ghost (this Mac):  ~/.local/bin/lg   (the binary)
 Source (galaxy-04): /home/tpark45/.local/bin/lg   remote_root=/home/tpark45/two-stage-stitcher
 config: host=tpark45@galaxy-04.cs.wisc.edu  user=tpark45  ssh_mode=system
         agent_bin=/home/tpark45/.local/bin/lg   <-- ABSOLUTE: galaxy's non-interactive
         PATH lacks ~/.local/bin, so a bare "lg" would not be found.
 ```
+
+### Config is project-local (per-directory)
+
+lg is project-local, like git. `lg init` in a directory writes `<dir>/.lg/
+config.yaml` and ALL per-project state lives under that `.lg/` (journal, cache,
+`tree.json`, `lg.log`, hooks, run). Any lg command **discovers the nearest `.lg/`
+by walking up from the cwd** (project-only — no global config; outside a project
+it errors "not an lg project"). The remote tree mounts at a sibling dir **named
+exactly after the Source repo** (basename of remote_root, e.g. `<project>/two-
+stage-stitcher/`) next to `.lg/` — no mount-name option (FUSE can't mount over
+the project root without hiding `.lg/`). `lg <cmd>` runs in the remote dir
+matching your cwd: under `<mount>/a/b/c`, `lg ls` runs in `remote_root/a/b/c`
+(relDir from `os.Getwd` via `PathMapper.LocalToRel` → `ExecReq.Cwd`).
+`config.Dir()` is the single resolver (`internal/config/config.go`): it returns
+`$LG_HOME` if set (tests/escape hatch, read fresh — never cached), else the
+discovered `.lg/`. `lg init` uses `config.InitDir()` = `<cwd>/.lg` to bypass
+discovery. So per-project paths "just work" everywhere via `config.Dir()`.
+
+To live-test, `cd` into a project dir first (or `export LG_HOME=<some .lg dir>`).
+There is no longer a single `~/.lg/config.yaml`.
 
 ### Testing against galaxy WITHOUT triggering Duo
 
@@ -99,64 +166,73 @@ ssh -o BatchMode=yes galaxy-04 '/home/tpark45/.local/bin/lg --version'
 If no master is live, do NOT auto-connect — ask the user to bring one up (their
 shell login automation does), because the first connect needs a Duo push.
 
-### Verified end-to-end against galaxy (2026-06-21)
+### Verified end-to-end against galaxy (2026-06-30, Pivot v1.0)
 
-All core workflows were tested live against galaxy-04 and pass: browse + lazy
-read (ghost→cached), write-through (local edit → galaxy), reverse propagation
-(galaxy edit → mount), and SOURCE mode (auto-trigger → bridge to a tmux session
-on the A100 box → detach → session persists). LOCAL commands stay local; `exit`
-unmounts cleanly.
+All core workflows tested live against galaxy-04 and pass:
+- **Command runner** — `lg pwd` → remote root; `lg false`→1, `lg run -- sh -c
+  'exit 7'`→7 (exit codes propagate); `lg ls -la` (bare passthrough) streams;
+  incremental streaming (lines arrive 1s apart, not buffered); PTY allocated.
+- **Full-tree mount** — `lg shell` mounts; the entire tree is browsable
+  immediately with **real sizes on unopened files**; opening a file materializes
+  content on demand; `exit` unmounts cleanly.
+- **Sync both ways** — local edit → galaxy (write-through journal); galaxy edit →
+  mount (watcher invalidation updates the index).
+- **Tree-sync ignore** — propagating Ghost's `ignore` patterns to the agent cut
+  the initial walk from 32673 entries/~32s to 3196/~2.4s (skips `.venv`). The
+  agent honors `--ignore <csv>` (sent automatically by the Ghost dialer).
 
-Real bugs this live testing found and fixed (none were caught by unit tests):
-- tmux socket must be on LOCAL disk, not `~/.lg` — lab homes are **AFS/NFS** and
-  Unix sockets fail there ("new-session -d" succeeds but no server persists).
-  Agent now uses `/tmp/lg-tmux-<uid>.sock`.
-- Forward Ghost's `$TERM` to the agent or `tmux attach` dies with "open terminal
-  failed: terminal does not support clear".
-- `lg shell` could leave a stale mount on exit (signal skips the defer). Now it
-  also unmounts on SIGHUP/SIGTERM and force-unmounts as a backstop.
-- Directory-marker triggers fired for nearly every command (the "absent on
-  Ghost" half is always true for ignored markers). Disabled until a Source-side
-  presence check exists; explicit patterns (conda/venv/poetry/python) are the
-  reliable path.
+Bug this live testing found (not caught by the first unit pass, then covered by a
+test): the exec hub deadlocked — it waited for the stdin-copy goroutine to finish
+before sending `ExecExit`, but stdin only ends when the client closes the data
+stream, and the client keeps it open until it sees `ExecExit`. Fix: drive the
+exit off the **output/process** side (`cmd.Wait` after the pty EOFs), never the
+stdin side. See `internal/agent/exec.go` `serveData`.
 
-### How to drive the interactive shell head-less (the test harness)
+### How to drive `lg shell` head-less (the test harness)
 
-Run `lg shell` inside an isolated tmux server and send keys / capture the pane:
+`lg shell` is interactive (mounts FUSE + execs a shell), but the **mount is a
+real filesystem** — so the simplest test is: start `lg shell` in a tmux pane,
+then verify the mount from a *separate* process (`ls`/`cat` the mountpoint
+directly). No need to send keys into the lg shell at all.
 
 ```sh
-tmux -L lgtest new-session -d -s s -x 200 -y 50
-tmux -L lgtest send-keys -t s 'SHELL=/bin/bash lg shell' Enter   # see note below
-tmux -L lgtest send-keys -t s 'cat README.md' Enter
-tmux -L lgtest capture-pane -t s -p | tail -20
+# CRITICAL: start the pane shell as bash, NOT the user's zsh. `new-session`
+# without a command launches the login shell (zsh), whose ~/.zshrc runs a
+# galaxy-01..05 Duo/ControlMaster automation BEFORE your typed command — that
+# can push Duo. Starting the pane as bash --norc avoids it entirely.
+tmux -L lgtest new-session -d -s s -x 200 -y 50 '/bin/bash --norc --noprofile'
+tmux -L lgtest send-keys -t s 'SHELL=/bin/bash /path/to/bin/lg shell' Enter
+sleep 10                                   # wait for connect + tree sync (watch lg.log)
+ls -la  /Users/t/lg/two-stage-stitcher     # verify the full tree from THIS process
+head -5 /Users/t/lg/two-stage-stitcher/README.md   # materialize content on open
+tmux -L lgtest send-keys -t s 'exit' Enter # clean unmount
 ```
 
-IMPORTANT: launch with `SHELL=/bin/bash`. The user's `~/.zshrc` runs a
-galaxy-01..05 Duo/ControlMaster automation on every interactive zsh; `lg shell`
-sources it, which blocks and can push Duo. bash uses lg's own `--rcfile`
-(no zsh automation). The FUSE mount/sync is shell-agnostic, so you test the same
-behavior. To send a detach (Ctrl-b d) to the REMOTE tmux through the bridge,
-`send-keys` injects directly into the pane: `send-keys -t s C-b` then `d`.
+`SHELL=/bin/bash` makes lg's *child* shell bash (its own `--rcfile`, no zsh
+automation). Watch sync progress in `~/.lg/lg.log` (`tree synced entries=N`).
+Command-runner tests (`lg run -- ...`, `lg <cmd>`) are non-interactive and need
+no tmux at all — run them directly.
 
-Always clean up after: `pkill -9 -f 'lg shell'; umount -f <local_root>;
-ssh galaxy-04 'pkill -f "lg serve"; tmux -S /tmp/lg-tmux-$(id -u).sock kill-server'`.
+Always clean up: `tmux -L lgtest kill-server; pkill -9 -f 'lg shell';
+lg unmount; ssh galaxy-04 'pkill -f "lg serve"'`.
 
 ### What you can and can't test non-interactively
 
-- ✅ `go test ./...` — all logic incl. a real yamux Ghost<->Source over net.Pipe.
-- ✅ Remote agent reachable: `ssh galaxy-04 '<agent_bin> serve --help'`.
-- ✅ Config/CLI surface: `lg config show`, `lg status`, `lg hook check ...`.
-- ⚠️ `lg shell` and `lg enter-source` are **interactive** (they exec a shell /
-  bridge a PTY) — can't be driven head-less. Verify their pieces via the unit
-  tests and the live checks above; ask the user to run `lg shell` for the real
-  end-to-end. Logs go to `~/.lg/lg.log`.
+- ✅ `go test ./...` — all logic incl. a real yamux Ghost<->Source over net.Pipe
+  (exec round-trip, full-tree RPC, file RPC, framing).
+- ✅ Command runner end-to-end: `lg run -- <cmd>` / `lg <cmd>` (reuses the master).
+- ✅ Remote agent reachable: `ssh -o BatchMode=yes galaxy-04 '<agent_bin> --version'`.
+- ✅ Config/CLI surface: `lg config show`, `lg status`.
+- ⚠️ `lg shell` mount: drive via the tmux+separate-process recipe above, or ask
+  the user to run it. Logs go to `~/.lg/lg.log`.
 
 ## Recovering a wedged state
 
-- Stuck `lg shell` spamming / won't stop: `pkill -f 'lg shell'` then `lg unmount`.
+- Stuck `lg shell` / won't stop: `pkill -f 'lg shell'` then `lg unmount`.
 - Stale mount (ENXIO / "device not configured" touching local_root): `lg unmount`
-  (or `umount -f <local_root>`). `lg shell` now auto-recovers these on start.
-- Logs: `~/.lg/lg.log`. State db: `~/.lg/state.db`. Journal: `~/.lg/journal.log`.
+  (or `umount -f <local_root>`). `lg shell` auto-recovers these on start.
+- Logs/state are per-project under `<project>/.lg/`: `lg.log`, `journal.log`,
+  `tree.json`, `cache/`. (Find the project with `lg config path`.)
 
 ## House rules
 
@@ -173,6 +249,10 @@ ssh galaxy-04 'pkill -f "lg serve"; tmux -S /tmp/lg-tmux-$(id -u).sock kill-serv
 - A `make deploy-source` one-step redeploy of the Linux binary to Source.
 - A `lg doctor` that checks config + ssh reachability + remote agent + remote_root
   + macFUSE + stale mounts in one non-interactive command (great for agent tests).
-- In SOURCE mode there are two SSH connections (shell holds one for FUSE,
-  enter-source dials its own for the PTY); unifying via a per-session daemon +
-  socket is future work (see README "Known deviation").
+- Full-tree sync ships one whole `TreeResp` snapshot (fine for typical repos under
+  the 256 MiB frame cap); page it if a repo is huge.
+- `.git` is still synced into the mount (only `ignore` patterns are skipped). Add
+  `.git/` to config `ignore` if you want it out — git ops should run via `lg <cmd>`.
+- `lg toggle` uses the zsh/bash preexec hook; the bash DEBUG-trap path is
+  best-effort (zsh is the reliable one). Toggle state is `~/.lg/run/<tab>.toggle`.
+- `README.md`/`GUIDE.md` still describe the pre-pivot product — rewrite them.

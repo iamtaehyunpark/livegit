@@ -60,12 +60,14 @@ func (s *clientSource) Delete(ctx context.Context, req proto.DelReq) (proto.DelA
 	return ack, err
 }
 
-func (s *clientSource) List(ctx context.Context, rel string) (proto.ListResp, error) {
-	f, err := s.c.FileCall(ctx, proto.TypeListReq, proto.ListReq{Rel: rel})
+func (s *clientSource) Tree(ctx context.Context) ([]proto.TreeEntry, error) {
+	f, err := s.c.FileCall(ctx, proto.TypeTreeReq, proto.TreeReq{})
 	if err != nil {
-		return proto.ListResp{}, err
+		return nil, err
 	}
-	var resp proto.ListResp
-	err = proto.Unmarshal(f.Body, &resp)
-	return resp, err
+	var resp proto.TreeResp
+	if err := proto.Unmarshal(f.Body, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Entries, nil
 }

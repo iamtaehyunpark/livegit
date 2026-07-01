@@ -9,30 +9,42 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/taehyun/lg/internal/agentbin"
 	"github.com/taehyun/lg/internal/config"
+	"github.com/taehyun/lg/internal/docs"
+	"github.com/taehyun/lg/internal/transport"
 	"golang.org/x/term"
 )
 
 func newInitCmd() *cobra.Command {
-	var role, host, remoteRoot, localRoot, user string
+	var role, host, remoteRoot, user, auth string
 	var port int
 	var yes, forceInteractive bool
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Set up lg (interactive) — writes ~/.lg/config.yaml",
-		Long: `Set up lg.
+		Short: "Set up lg for the current directory — writes ./.lg/config.yaml",
+		Long: `Set up lg for a project.
+
+lg is project-local: this writes a config into a .lg/ directory in your CURRENT
+directory (like git's .git/). Any lg command you later run from this directory
+(or a subdirectory) auto-discovers and uses it.
 
 Run with no flags for a guided, step-by-step setup:
 
+    cd ~/myproject
     lg init
 
 Or pass flags to skip the prompts (useful for scripts):
 
-    lg init --role ghost --host gpu-1 --remote-root /home/u/proj --local-root ~/proj`,
+    lg init --role ghost --host gpu-1 --remote-root /home/u/proj
+
+The remote tree mounts at a folder named exactly after the Source repo (the
+basename of --remote-root), next to .lg/. There is no mount-name option — the
+local mirror always carries the repo's own name.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			in := &wizardInput{
 				role: role, host: host, remoteRoot: remoteRoot,
-				localRoot: localRoot, user: user, port: port,
+				user: user, port: port, auth: auth,
 			}
 			// Interactive when forced, or on a TTY without full flag input.
 			interactive := forceInteractive || (term.IsTerminal(int(os.Stdin.Fd())) && !in.complete())
@@ -41,6 +53,19 @@ Or pass flags to skip the prompts (useful for scripts):
 					return err
 				}
 			}
+			// Password (for --auth password) is never taken on the command line;
+			// prompt for it (hidden) whenever password auth is chosen but unset.
+			if in.auth == "password" && in.password == "" {
+				target := in.host
+				if in.user != "" && !strings.Contains(target, "@") {
+					target = in.user + "@" + target
+				}
+				pw, err := askPassword("SSH password for " + target)
+				if err != nil {
+					return err
+				}
+				in.password = pw
+			}
 			return writeConfig(in, yes || !interactive)
 		},
 	}
@@ -48,8 +73,8 @@ Or pass flags to skip the prompts (useful for scripts):
 	cmd.Flags().StringVar(&role, "role", "", "ghost|source")
 	cmd.Flags().StringVar(&host, "host", "", "Source ssh host (ghost role)")
 	cmd.Flags().StringVar(&remoteRoot, "remote-root", "", "absolute repo path on Source")
-	cmd.Flags().StringVar(&localRoot, "local-root", "", "Ghost FUSE mount point")
 	cmd.Flags().StringVar(&user, "user", "", "ssh user (default $USER)")
+	cmd.Flags().StringVar(&auth, "auth", "", "auth method: '' (ssh key/agent) or 'password' (prompts, stored encrypted)")
 	cmd.Flags().IntVar(&port, "port", 0, "ssh port (default 22)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip confirmation prompts")
 	cmd.Flags().BoolVarP(&forceInteractive, "interactive", "i", false, "force the step-by-step wizard")
@@ -57,21 +82,24 @@ Or pass flags to skip the prompts (useful for scripts):
 	return cmd
 }
 
-// wizardInput collects answers (from flags and/or prompts).
+// wizardInput collects answers (from flags and/or prompts). The local mount
+// point is NOT an input: it's always derived as a sibling of .lg/ named exactly
+// after the Source repo (basename of remote_root).
 type wizardInput struct {
 	role       string
 	host       string
 	remoteRoot string
-	localRoot  string
 	user       string
 	port       int
+	auth       string // "" or "password"
+	password   string // collected in-memory only; stored encrypted, never in argv
 }
 
 // complete reports whether enough was supplied via flags to skip prompting.
 func (w *wizardInput) complete() bool {
 	switch config.Role(w.role) {
 	case config.RoleGhost:
-		return w.host != "" && w.remoteRoot != "" && w.localRoot != ""
+		return w.host != "" && w.remoteRoot != ""
 	case config.RoleSource:
 		return w.remoteRoot != ""
 	default:
@@ -105,15 +133,34 @@ func runWizard(in *wizardInput) error {
 	in.user = ask(r, "  SSH user", curUser, false)
 	in.port = askInt(r, "  SSH port", orInt(in.port, 22))
 
-	fmt.Println()
-	fmt.Println("And where on this laptop should the project appear?")
-	defMount := in.localRoot
-	if defMount == "" {
-		home, _ := os.UserHomeDir()
-		defMount = filepath.Join(home, filepath.Base(strings.TrimRight(in.remoteRoot, "/")))
+	// Auth: default to ssh key/agent; if the host needs a password, collect it
+	// (hidden) and store it encrypted. Skip if --auth already chose the method.
+	if in.auth == "" {
+		fmt.Println()
+		fmt.Println("Auth: leave the password blank to use your ssh key/agent (recommended).")
+		fmt.Println("Only enter a password if this host requires one and your key isn't set up.")
+		pw, err := askPassword("  SSH password (blank = ssh key/agent)")
+		if err != nil {
+			return err
+		}
+		if pw != "" {
+			in.auth = "password"
+			in.password = pw
+		}
 	}
-	in.localRoot = ask(r, "  Local mount point", defMount, true)
+
+	fmt.Println()
+	fmt.Printf("The remote tree will mount at:  %s\n", mountFor(in.remoteRoot))
+	fmt.Println("(a folder named after the repo, next to this project's .lg/ config)")
 	return nil
+}
+
+// mountFor is the local mount point for a project: a sibling of `.lg/` named
+// exactly after the Source repo (basename of remote_root). There is no choice
+// here — the local mirror always carries the repo's own name.
+func mountFor(remoteRoot string) string {
+	name := filepath.Base(strings.TrimRight(remoteRoot, "/"))
+	return filepath.Join(filepath.Dir(config.InitDir()), name)
 }
 
 func writeConfig(in *wizardInput, skipConfirm bool) error {
@@ -126,37 +173,37 @@ func writeConfig(in *wizardInput, skipConfirm bool) error {
 	c.Source.RemoteRoot = in.remoteRoot
 	c.Source.User = in.user
 	c.Source.Port = in.port
-	c.LocalRoot = expandHome(in.localRoot)
 	c.Source.RemoteRoot = strings.TrimRight(c.Source.RemoteRoot, "/")
+	c.Source.Auth = in.auth
+	if in.auth == "password" {
+		c.Source.SSHMode = "native" // system `ssh` can't answer a prompt non-interactively
+	}
+	if config.Role(in.role) == config.RoleGhost {
+		// Mount dir is always named after the Source repo (no selection).
+		c.LocalRoot = mountFor(c.Source.RemoteRoot)
+	}
 
-	// Sensible defaults so a fresh config is immediately usable (§8).
-	c.Ignore = []string{".venv/", "node_modules/", "*.pt"}
+	// Sensible defaults so a fresh config is immediately usable.
+	c.Ignore = []string{".DS_Store", ".venv/", "node_modules/", "*.pt"}
 	c.Cache.EvictAfterIdleMinutes = 30
 	c.Cache.MaxCacheSizeGB = 10
-	c.SourceTriggers.Patterns = []string{
-		"^conda activate", "^source .*/bin/activate", "^poetry shell", "^pyenv activate",
-	}
-	c.SourceTriggers.ExitCommandMap = map[string]string{
-		"^conda activate":         "conda deactivate",
-		"^source .*/bin/activate": "deactivate",
-		"^poetry shell":           "exit",
-	}
-	c.SourceTriggers.DirectoryMarkers = []string{".venv", "node_modules", "Pipfile.lock", "poetry.lock"}
-	c.SourceTriggers.AlwaysSourcePatterns = []string{"^python "}
-	c.Offline.OnSourceTrigger = "queue"
-	c.ReadonlyCommands = []string{"cat", "head", "tail", "less", "grep", "find", "ls"}
 
 	if err := c.Validate(); err != nil {
 		return err
 	}
+
+	// lg init always targets a `.lg/` in the CURRENT directory (it bypasses the
+	// walk-up discovery, which would find a parent project or nothing).
+	initDir := config.InitDir()
+	cfgPath := filepath.Join(initDir, "config.yaml")
 
 	// Summary + confirmation.
 	if !skipConfirm {
 		fmt.Println()
 		fmt.Println("Here's what I'll write:")
 		printSummary(c)
-		if config.Exists() {
-			fmt.Printf("\n%s already exists and will be overwritten.\n", config.Path())
+		if _, err := os.Stat(cfgPath); err == nil {
+			fmt.Printf("\n%s already exists and will be overwritten.\n", cfgPath)
 		}
 		if !confirm(bufio.NewReader(os.Stdin), "Write this config?", true) {
 			fmt.Println("aborted — nothing written.")
@@ -164,27 +211,61 @@ func writeConfig(in *wizardInput, skipConfirm bool) error {
 		}
 	}
 
-	if err := os.MkdirAll(config.Dir(), 0o755); err != nil {
+	if err := os.MkdirAll(initDir, 0o755); err != nil {
 		return err
 	}
 	if c.Role == config.RoleGhost {
-		_ = os.MkdirAll(config.CacheDir(), 0o755)
+		_ = os.MkdirAll(filepath.Join(initDir, "cache"), 0o755)
 		_ = os.MkdirAll(c.LocalRoot, 0o755)
 	}
-	if err := c.Save(); err != nil {
+	if err := c.SaveTo(cfgPath); err != nil {
 		return err
 	}
+	fmt.Printf("\n✓ wrote %s\n", cfgPath)
 
-	fmt.Printf("\n✓ wrote %s\n", config.Path())
-	if c.Role == config.RoleGhost {
-		fmt.Println("\nNext steps:")
-		fmt.Printf("  1. Make sure plain ssh works:   ssh %s\n", sshTarget(c))
-		fmt.Println("  2. Start working:               lg shell")
-		fmt.Println("\nChange anything later with:       lg config set <key> <value>")
-	} else {
+	// Drop the guides into the project root (next to .lg/) so any CLI or coding
+	// agent working here references them natively. Don't clobber a copy the user
+	// may have edited — only write when absent.
+	projectRoot := filepath.Dir(initDir)
+	for _, d := range docs.Files() {
+		dst := filepath.Join(projectRoot, d.Name)
+		if _, err := os.Stat(dst); err == nil {
+			continue // already there — leave the user's copy alone
+		}
+		if err := os.WriteFile(dst, d.Content, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "lg: warning: couldn't write %s: %v\n", dst, err)
+			continue
+		}
+		fmt.Printf("✓ wrote %s\n", dst)
+	}
+
+	if c.Role == config.RoleSource {
 		fmt.Println("\nThis machine is the Source. Make sure `lg` is on its PATH;")
 		fmt.Println("your laptop launches the agent over ssh automatically.")
+		return nil
 	}
+
+	// Store the password (encrypted) so lg can authenticate on its own.
+	if c.Source.Auth == "password" {
+		if err := config.SavePassword(in.password); err != nil {
+			fmt.Fprintf(os.Stderr, "lg: warning: couldn't store the password: %v\n", err)
+		} else {
+			fmt.Printf("✓ stored password (encrypted) in %s\n", config.CredentialsPath())
+		}
+	}
+
+	// Confirm/deploy the agent on the remote (best-effort — a host needing an
+	// interactive step, e.g. Duo, may not be reachable non-interactively here).
+	fmt.Printf("→ checking the agent on %s …\n", sshTarget(c))
+	if msg, err := transport.EnsureAgent(c, agentbin.Pick); err != nil {
+		fmt.Fprintf(os.Stderr, "lg: couldn't verify/deploy the agent automatically (%v)\n", err)
+		fmt.Fprintf(os.Stderr, "    ensure `lg` exists at ~/.local/bin/lg on Source (or run `lg init` again once ssh works).\n")
+	} else {
+		fmt.Printf("✓ %s\n", msg)
+	}
+
+	fmt.Println("\nStart working:  lg shell")
+	fmt.Println("Change settings later with:  lg config set <key> <value>")
 	return nil
 }
 
@@ -194,6 +275,9 @@ func printSummary(c *config.Config) {
 		fmt.Printf("  server:      %s\n", sshTarget(c))
 		fmt.Printf("  remote repo: %s\n", c.Source.RemoteRoot)
 		fmt.Printf("  local mount: %s\n", c.LocalRoot)
+		if c.Source.Auth == "password" {
+			fmt.Printf("  auth:        password (stored encrypted, native ssh)\n")
+		}
 	} else {
 		fmt.Printf("  remote repo: %s\n", c.Source.RemoteRoot)
 	}
@@ -211,6 +295,19 @@ func sshTarget(c *config.Config) string {
 }
 
 // --- prompt helpers ---
+
+// askPassword reads a secret without echoing it. Falls back to a plain line read
+// when stdin isn't a terminal (e.g. piped input in scripts).
+func askPassword(prompt string) (string, error) {
+	fmt.Printf("%s: ", prompt)
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		return strings.TrimRight(line, "\r\n"), nil
+	}
+	b, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	return string(b), err
+}
 
 func ask(r *bufio.Reader, prompt, def string, required bool) string {
 	for {
@@ -292,12 +389,4 @@ func orInt(v, def int) int {
 		return def
 	}
 	return v
-}
-
-func expandHome(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(p, "~"), "/"))
-	}
-	return p
 }

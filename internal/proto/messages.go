@@ -27,16 +27,19 @@ const (
 	TypeListReq  MsgType = 18 // directory listing
 	TypeListResp MsgType = 19
 
+	// Full-tree metadata sync (Ghost -> Source over the file-RPC stream).
+	TypeTreeReq  MsgType = 20 // request the entire remote tree's metadata
+	TypeTreeResp MsgType = 21
+
 	// Change notification (Source -> Ghost over the notify stream).
 	TypeInvalidate MsgType = 30
 
-	// tmux session control (Ghost -> Source over a PTY-control stream).
-	TypeSessionReq  MsgType = 40 // create/attach a session
-	TypeSessionResp MsgType = 41
-	TypeSessionList MsgType = 42
-	TypeSessionsRsp MsgType = 43
-	TypeResize      MsgType = 44 // terminal resize (SIGWINCH) for a PTY session
-	TypeExit        MsgType = 45 // remote tmux attach detached/exited
+	// Command runner (Ghost -> Source over a PTY-control + PTY-data stream pair).
+	// One remote process per invocation, run inside a real PTY.
+	TypeExecReq  MsgType = 40 // start a command in a PTY
+	TypeExecResp MsgType = 41 // reply with the token that pairs the data stream
+	TypeExecExit MsgType = 42 // pushed when the remote process exits (carries code)
+	TypeResize   MsgType = 44 // terminal resize (SIGWINCH) for the active PTY
 )
 
 // Frame is the envelope every message travels in.
@@ -121,46 +124,58 @@ type ListResp struct {
 	Entries []DirEntry
 }
 
+// --- Full-tree metadata sync ---
+
+// TreeEntry is one node in Source's full directory tree. Sent eagerly so Ghost
+// can render the entire mount (names, sizes, types at all depths) without a
+// round-trip per `ls`, OneDrive-style. Hash may be empty (filled on read).
+type TreeEntry struct {
+	Rel     string
+	IsDir   bool
+	Size    int64
+	ModTime int64 // unix seconds
+	Mode    uint32
+	Hash    string
+}
+type TreeReq struct{}
+type TreeResp struct{ Entries []TreeEntry }
+
 // --- Change notification ---
 
-// Invalidate tells Ghost that Source's copy of Rel changed (spec §4.3). No
-// content is sent; Ghost decides lazily whether to refetch.
+// Invalidate tells Ghost that Source's copy of Rel changed. It carries enough
+// metadata to update the full-tree index in place (not just mark content
+// stale): create/delete/rename/size-change all flow through here.
 type Invalidate struct {
 	Rel     string
 	Deleted bool
+	IsDir   bool
+	Size    int64
+	Mode    uint32
 	Hash    string
 	ModTime int64
 }
 
-// --- tmux session control ---
+// --- Command runner ---
 
-type SessionReq struct {
-	Project string
-	TabID   string
-	Cols    uint16
-	Rows    uint16
-	Term    string // Ghost's $TERM, so the remote tmux client can init the terminal
-}
-type SessionResp struct {
-	Name    string
-	Created bool // true if a new session was made, false if attached existing
-	Message string
+// ExecReq starts one command in a PTY on Source. Cwd is a rel path (mapped to
+// the remote root); empty means the remote root itself.
+type ExecReq struct {
+	Cmd  string
+	Cwd  string
+	Cols uint16
+	Rows uint16
+	Term string // Ghost's $TERM, so the remote PTY initialises the terminal
 }
 
-type SessionInfo struct {
-	Name     string
-	Attached bool
-	Windows  int
-	Created  int64
-}
-type SessionListReq struct{}
-type SessionsResp struct{ Sessions []SessionInfo }
+// ExecResp returns the token Ghost writes on the data stream to pair it.
+type ExecResp struct{ Token string }
 
-// Resize carries a SIGWINCH from Ghost to Source for the active PTY session.
+// ExecExit is pushed on the control stream when the remote process exits, so
+// Ghost can propagate the exit code locally.
+type ExecExit struct{ Code int }
+
+// Resize carries a SIGWINCH from Ghost to Source for the active PTY.
 type Resize struct {
 	Cols uint16
 	Rows uint16
 }
-
-// ExitNote signals the remote attach ended (session detached or tmux exited).
-type ExitNote struct{ Message string }

@@ -16,10 +16,29 @@ GOBUILD     := CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)"
 # Platforms for `make release`.
 PLATFORMS   := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 
-.PHONY: build install uninstall test vet clean release
+.PHONY: build install uninstall test vet clean release agents docs
 
-## build: compile the binary into ./bin/lg
-build:
+AGENTDIR := internal/agentbin/data
+DOCSDIR  := internal/docs
+
+## docs: sync the embedded guides with the repo-root originals (so `lg init`
+## drops the current GUIDE.md / AGENTS.md into each project root).
+docs:
+	@cp GUIDE.md AGENTS.md $(DOCSDIR)/
+	@echo "synced embedded docs in $(DOCSDIR)"
+
+## agents: cross-compile the Linux agent binaries embedded into the host binary
+## (so `lg init` can deploy a matching agent to a passworded Source).
+agents:
+	@mkdir -p $(AGENTDIR)
+	@for arch in amd64 arm64; do \
+	  CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -ldflags "$(LDFLAGS)" \
+	    -o $(AGENTDIR)/lg-linux-$$arch $(PKG); \
+	done
+	@echo "embedded linux agents ($(VERSION)) in $(AGENTDIR)"
+
+## build: compile the binary into ./bin/lg (embeds the Linux agents + guides)
+build: agents docs
 	@mkdir -p bin
 	$(GOBUILD) -o bin/$(BINARY) $(PKG)
 	@# On macOS, re-sign with a full ad-hoc signature. The linker's adhoc

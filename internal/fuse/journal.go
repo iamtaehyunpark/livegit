@@ -216,9 +216,9 @@ func (j *Journal) Close() error {
 }
 
 // ScanPendingDir reads a journal file read-only and reports whether any entry
-// targets relDir or its subtree. Used by the `lg enter-source` process (which
-// does not own the in-memory Journal) to implement the SOURCE-entry flush
-// barrier (§5.3) by polling.
+// targets relDir or its subtree. Used by the `lg run` process (which does not
+// own the in-memory Journal) to implement the pre-run flush barrier by polling —
+// so a remote command sees the latest local edits.
 func ScanPendingDir(journalPath, relDir string) (bool, error) {
 	f, err := os.Open(journalPath)
 	if err != nil {

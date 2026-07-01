@@ -1,56 +1,41 @@
 package fuse
 
 import (
-	"context"
 	"os"
-	"time"
 
 	"github.com/taehyun/lg/internal/config"
 	"github.com/taehyun/lg/internal/proto"
 )
 
-// Invalidate handles a Source->Ghost change push (§4.3). No content arrives with
-// the push; Ghost decides lazily based on the file's local state.
+// Invalidate handles a Source->Ghost change push: it keeps the full-tree index
+// current (create/delete/rename/size-change) and drops any stale cached content
+// so the next open refetches. With Source as the source of truth for content,
+// there is no conflict apparatus — but a path with an unflushed local edit keeps
+// its cached bytes until the flush worker pushes them (last-write-wins).
 func (b *Backend) Invalidate(inv proto.Invalidate) {
 	rel := config.Rel(inv.Rel)
-	meta, _ := b.store.Get(rel)
 
 	if inv.Deleted {
-		if meta != nil {
+		b.index.Remove(rel)
+		if !b.journal.HasPending(rel) {
 			_ = os.Remove(b.cachePath(rel))
-			_ = b.store.Delete(rel)
 		}
 		b.log.Debug("invalidate: deleted on source", "rel", rel)
 		return
 	}
 
-	switch {
-	case meta == nil || meta.State == StateGhost:
-		// Ghost state: just mark metadata stale; refetch lazily on next open.
-		_ = b.store.Upsert(&Meta{
-			Path:           rel,
-			State:          StateGhost,
-			ContentHash:    inv.Hash,
-			LastModifiedBy: "source",
-			LastModifiedAt: inv.ModTime,
-			LastAccessedAt: time.Now().Unix(),
-		})
-	case meta.State == StateCached:
-		// Actively cached (and not dirty): refetch immediately to reflect it.
-		if inv.Hash != "" && inv.Hash == meta.ContentHash {
-			return // already current
+	prev, had := b.index.Get(rel)
+	b.index.Put(&Entry{
+		Rel: rel, IsDir: inv.IsDir, Size: inv.Size,
+		ModTime: inv.ModTime, Mode: inv.Mode, Hash: inv.Hash,
+	})
+
+	// Content changed on Source: drop our cached copy (next open refetches),
+	// unless we have an unflushed local edit for this path.
+	if !inv.IsDir && !b.journal.HasPending(rel) {
+		if !had || prev.Hash != inv.Hash {
+			_ = os.Remove(b.cachePath(rel))
+			b.index.SetHaveContent(rel, false)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		// Force a fresh fetch by dropping to ghost first, then materializing.
-		_ = b.store.SetState(rel, StateGhost)
-		if _, err := b.Materialize(ctx, rel); err != nil {
-			b.log.Warn("invalidate refetch failed", "rel", rel, "err", err)
-		}
-	case meta.State == StateLive:
-		// Local has unflushed edits AND source changed: a true conflict. The
-		// flush worker will detect the BaseHash mismatch and Source will back up
-		// its copy (§4.4). Don't clobber the local edit by refetching here.
-		b.log.Warn("invalidate while live (pending local edits); flush will resolve", "rel", rel)
 	}
 }

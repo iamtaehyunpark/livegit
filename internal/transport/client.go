@@ -66,29 +66,38 @@ func (c *Client) supervise() {
 	log := logx.For("client")
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
+	// A connection that dies sooner than this is treated as a failed attempt
+	// (e.g. the remote agent is missing and `lg serve` exits immediately). Only a
+	// session that stayed up longer resets the backoff — otherwise a misconfig
+	// would reconnect in a tight loop and hammer the server.
+	const minHealthy = 5 * time.Second
 	loggedOutage := false
 	for c.ctx.Err() == nil {
-		if err := c.connectOnce(); err != nil {
-			if !loggedOutage {
-				log.Warn("connect failed; will keep retrying quietly", "err", err)
-				loggedOutage = true
-			} else {
-				log.Debug("connect retry failed", "err", err, "retry_in", backoff)
-			}
-			c.status.set(false)
-			select {
-			case <-c.ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < maxBackoff {
-				backoff *= 2
-			}
+		start := time.Now()
+		err := c.connectOnce()
+		lasted := time.Since(start)
+
+		if err == nil && lasted >= minHealthy {
+			backoff = time.Second // genuinely healthy session that has now ended
+			loggedOutage = false
 			continue
 		}
-		backoff = time.Second // reset after a healthy connection
-		loggedOutage = false  // next outage will log again
-		// connectOnce blocks until the connection dies.
+		if !loggedOutage {
+			log.Warn("not connected (agent missing, or link dropped immediately); retrying with backoff",
+				"err", err, "lasted", lasted.Round(time.Millisecond))
+			loggedOutage = true
+		} else {
+			log.Debug("connect retry failed", "err", err, "lasted", lasted, "retry_in", backoff)
+		}
+		c.status.set(false)
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+		}
 	}
 }
 

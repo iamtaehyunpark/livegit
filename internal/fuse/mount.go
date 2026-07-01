@@ -41,9 +41,30 @@ func NewMount(mountpoint string, b *Backend) (*Mount, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go b.RunFlush(ctx)
 	go b.RunEviction(ctx)
+	go b.RunTreeSync(ctx)
+	go b.runSnapshotSaver(ctx)
 
 	logx.For("fuse").Info("mounted", "mountpoint", mountpoint)
 	return &Mount{server: server, backend: b, cancel: cancel, mountpoint: mountpoint}, nil
+}
+
+// runSnapshotSaver periodically persists the metadata index so browsing survives
+// an unclean exit / offline restart.
+func (b *Backend) runSnapshotSaver(ctx context.Context) {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			b.index.SaveSnapshot()
+			return
+		case <-b.stop:
+			b.index.SaveSnapshot()
+			return
+		case <-t.C:
+			b.index.SaveSnapshot()
+		}
+	}
 }
 
 // Wait blocks until the filesystem is unmounted.

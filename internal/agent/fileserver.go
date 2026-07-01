@@ -64,6 +64,9 @@ func (fs *FileServer) Handle(f proto.Frame) (proto.MsgType, any, bool, error) {
 		_ = proto.Unmarshal(f.Body, &req)
 		resp, err := fs.list(req.Rel)
 		return proto.TypeListResp, resp, true, err
+	case proto.TypeTreeReq:
+		resp, err := fs.tree()
+		return proto.TypeTreeResp, resp, true, err
 	default:
 		return 0, nil, false, fmt.Errorf("fileserver: unexpected type %d", f.Type)
 	}
@@ -200,6 +203,45 @@ func (fs *FileServer) list(rel string) (proto.ListResp, error) {
 	}
 	sort.Slice(out.Entries, func(i, j int) bool { return out.Entries[i].Name < out.Entries[j].Name })
 	return out, nil
+}
+
+// tree walks the entire remote root and returns one TreeEntry per file/dir
+// (honoring .lgignore), so Ghost can render the whole mount eagerly. Content
+// hashes are left empty here — walking 50k files to hash them all would be slow;
+// Ghost fills the hash lazily on first read (§2 OneDrive-style).
+func (fs *FileServer) tree() (proto.TreeResp, error) {
+	var out proto.TreeResp
+	err := filepath.WalkDir(fs.root, func(abs string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable paths rather than aborting the whole walk
+		}
+		rel, rerr := fs.mapper.RemoteToRel(abs)
+		if rerr != nil {
+			return nil
+		}
+		if rel == "" || rel == "." {
+			return nil // don't emit the root itself
+		}
+		if fs.matcher != nil && fs.matcher.Match(rel, d.IsDir()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		out.Entries = append(out.Entries, proto.TreeEntry{
+			Rel:     rel,
+			IsDir:   d.IsDir(),
+			Size:    info.Size(),
+			ModTime: info.ModTime().Unix(),
+			Mode:    uint32(info.Mode().Perm()),
+		})
+		return nil
+	})
+	return out, err
 }
 
 func copyFile(src, dst string) error {

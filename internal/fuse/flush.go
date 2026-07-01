@@ -40,24 +40,24 @@ func (b *Backend) RunFlush(ctx context.Context) {
 }
 
 func (b *Backend) flushEntry(ctx context.Context, e JournalEntry) error {
+	// Drop entries for ignored paths (e.g. a .DS_Store journaled before the guard
+	// existed): never push them to Source, just clear them from the journal.
+	if b.ignored(e.Rel) {
+		return b.journal.Ack(e.Seq)
+	}
 	switch e.Op {
 	case OpDelete:
-		ack, err := b.source.Delete(ctx, proto.DelReq{Rel: e.Rel, BaseHash: e.BaseHash})
-		if err != nil {
+		// Last-write-wins: empty BaseHash means Source just removes it.
+		if _, err := b.source.Delete(ctx, proto.DelReq{Rel: e.Rel, BaseHash: e.BaseHash}); err != nil {
 			return err
 		}
-		if ack.Conflict {
-			b.recordConflict(Conflict{Rel: e.Rel, At: time.Now(), Detail: ack.Message})
-			// Source kept its newer copy; drop our delete and re-sync metadata.
-		}
-		_ = b.store.Delete(e.Rel)
 		return b.journal.Ack(e.Seq)
 
 	default: // write / create
 		content, err := os.ReadFile(b.cachePath(e.Rel))
 		if err != nil {
 			if os.IsNotExist(err) {
-				// File vanished before flush (e.g. evicted+deleted); drop entry.
+				// File vanished before flush (e.g. deleted); drop entry.
 				return b.journal.Ack(e.Seq)
 			}
 			return err
@@ -65,33 +65,20 @@ func (b *Backend) flushEntry(ctx context.Context, e JournalEntry) error {
 		ack, err := b.source.Write(ctx, proto.WriteReq{
 			Rel:      e.Rel,
 			Content:  content,
-			BaseHash: e.BaseHash,
+			BaseHash: e.BaseHash, // empty: last-write-wins, Source overwrites
 			ModTime:  e.ModTime,
 			Mode:     e.Mode,
 		})
 		if err != nil {
 			return err
 		}
-		if ack.Conflict {
-			b.recordConflict(Conflict{
-				Rel:       e.Rel,
-				BackupRel: ack.BackupRel,
-				At:        time.Now(),
-				Detail:    "source diverged; source copy backed up before applying ghost change",
+		// Record the synced hash so a later Source invalidation for the same
+		// content doesn't needlessly drop our cache.
+		if ack.NewHash != "" {
+			b.index.Put(&Entry{
+				Rel: e.Rel, Size: int64(len(content)), ModTime: e.ModTime,
+				Mode: e.Mode, Hash: ack.NewHash, HaveContent: true,
 			})
-		}
-		// Flush succeeded: this is now the sync point. Move live -> cached.
-		now := time.Now().Unix()
-		if err := b.store.Upsert(&Meta{
-			Path:           e.Rel,
-			State:          StateCached,
-			ContentHash:    ack.NewHash,
-			LastModifiedBy: "ghost",
-			LastModifiedAt: now,
-			LastAccessedAt: now,
-			SizeBytes:      int64(len(content)),
-		}); err != nil {
-			return err
 		}
 		return b.journal.Ack(e.Seq)
 	}

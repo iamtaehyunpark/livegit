@@ -23,8 +23,8 @@ const (
 	StreamControl StreamKind = 1 // health ping/pong
 	StreamFile    StreamKind = 2 // file RPC (Ghost initiates)
 	StreamNotify  StreamKind = 3 // invalidation push (Source initiates)
-	StreamPTY     StreamKind = 4 // raw PTY bytes for one tmux session
-	StreamPTYCtl  StreamKind = 5 // tmux session create/attach/list control
+	StreamPTY     StreamKind = 4 // raw PTY bytes for one remote command
+	StreamPTYCtl  StreamKind = 5 // exec control (ExecReq/Resize/ExecExit) for that command
 )
 
 func (k StreamKind) String() string {

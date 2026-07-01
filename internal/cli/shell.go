@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -12,13 +11,11 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/taehyun/lg/internal/config"
 	"github.com/taehyun/lg/internal/fuse"
 	"github.com/taehyun/lg/internal/shell"
-	"github.com/taehyun/lg/internal/transport"
 )
 
 func newShellCmd() *cobra.Command {
@@ -35,6 +32,12 @@ func runShell() error {
 	c, err := loadGhost()
 	if err != nil {
 		return err
+	}
+	// Fallback for older configs without a mount point: a sibling of .lg/ named
+	// after the Source repo (basename of remote_root).
+	if c.LocalRoot == "" {
+		name := filepath.Base(strings.TrimRight(c.Source.RemoteRoot, "/"))
+		c.LocalRoot = filepath.Join(filepath.Dir(config.Dir()), name)
 	}
 
 	// A previous `lg shell` killed without unmounting leaves a stale FUSE mount
@@ -62,11 +65,10 @@ func runShell() error {
 	if err != nil {
 		return err
 	}
-	store, journal, err := openGhostStores()
+	journal, err := openGhostJournal()
 	if err != nil {
 		return err
 	}
-	defer store.Close()
 	defer journal.Close()
 
 	// Send background connection/health logs to a file, not the terminal.
@@ -76,7 +78,7 @@ func runShell() error {
 	client := newClient(c)
 	defer client.Close()
 	source := fuse.NewClientSource(client)
-	backend := fuse.NewBackend(c, store, journal, source, matcher)
+	backend := fuse.NewBackend(c, journal, source, matcher)
 	client.OnInvalidate(backend.Invalidate)
 
 	mount, err := fuse.NewMount(c.LocalRoot, backend)
@@ -98,14 +100,14 @@ func runShell() error {
 		os.Exit(0)
 	}()
 
-	if _, _, err := shell.InstallIntegration(); err != nil {
+	if _, _, err := shell.InstallIntegration(c.AutoRemoteCommands); err != nil {
 		return err
 	}
 	tabID, err := genTabID()
 	if err != nil {
 		return err
 	}
-	defer shell.ClearState(tabID)
+	defer shell.ClearToggle(tabID)
 
 	fmt.Fprintf(os.Stderr, "lg: mounted %s (tab %s)\n", c.LocalRoot, tabID)
 	fmt.Fprintf(os.Stderr, "lg: connecting to %s in the background", c.Source.Host)
@@ -114,44 +116,16 @@ func runShell() error {
 	}
 	fmt.Fprintf(os.Stderr, "\n")
 
-	// default_target=source: start directly in a persistent tmux session on
-	// Source, reusing this shell's own ssh connection (no second agent). Detach
-	// (Ctrl-b d) drops to a LOCAL shell; the mount stays live the whole time.
+	// default_target=source: start with toggle mode ON, so every command in this
+	// shell runs on Source from the outset (§1.2). The mount stays live; `lg
+	// toggle` (or `lg local`) drops back to a normal local shell.
 	if c.DefaultTarget == "source" {
-		startInSource(c, client, backend, tabID)
+		_ = shell.SetToggle(tabID, true)
+		fmt.Fprintf(os.Stderr, "lg: toggle ON — commands run on %s. `lg toggle` to run locally.\n", c.Source.Host)
 	}
 
 	fmt.Fprintf(os.Stderr, "lg: type 'exit' to leave (unmounts and disconnects cleanly).\n")
 	return execUserShell(c, tabID)
-}
-
-// startInSource bridges straight into the remote session at shell startup,
-// reusing the FUSE connection. Returns when the user detaches.
-func startInSource(c *config.Config, client *transport.Client, backend *fuse.Backend, tabID string) {
-	fmt.Fprintf(os.Stderr, "lg: starting on %s (detach with Ctrl-b d to drop to a local shell)...\n", c.Source.Host)
-	if err := waitOnline(client, 15*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "lg: couldn't connect (%v); starting in a local shell instead.\n", err)
-		return
-	}
-	// Make sure Source has our latest edits before running there.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	_ = backend.FlushBarrier(ctx, "", 10*time.Second)
-	cancel()
-
-	st := shell.LoadState(tabID)
-	st.SetSource("default", "", "")
-	_ = st.Save()
-
-	sess, err := shell.Bridge(client, projectID(c), tabID, "")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "lg: source session error: %v\n", err)
-	}
-
-	st = shell.LoadState(tabID)
-	st.Session = sess
-	st.SetLocal()
-	_ = st.Save()
-	fmt.Fprintf(os.Stderr, "lg: detached from %s — now in a local shell.\n", c.Source.Host)
 }
 
 // execUserShell runs the user's real shell with lg integration injected via
@@ -164,6 +138,7 @@ func execUserShell(c *config.Config, tabID string) error {
 	env := append(os.Environ(),
 		"LG_TAB_ID="+tabID,
 		"LG_PROJECT="+projectID(c),
+		"LG_LOCAL_ROOT="+c.LocalRoot, // mount path: auto-route only applies under it
 	)
 
 	var cmd *exec.Cmd

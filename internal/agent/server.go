@@ -1,9 +1,7 @@
 package agent
 
 import (
-	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 
 	"github.com/hashicorp/yamux"
@@ -20,28 +18,24 @@ type Server struct {
 	remoteRoot string
 	matcher    *config.Matcher
 	file       *FileServer
-	tmux       *tmuxManager
-	pty        *ptyHub
+	exec       *execHub
 }
 
-// NewServer builds the Source daemon for a given remote root.
-func NewServer(remoteRoot string) (*Server, error) {
+// NewServer builds the Source daemon for a given remote root. ignore carries the
+// Ghost's configured ignore patterns (merged with the repo's .lgignore) so the
+// full-tree walk and watcher skip node_modules/.venv/.git/etc — keeping the
+// initial sync fast and the mount free of noise.
+func NewServer(remoteRoot string, ignore []string) (*Server, error) {
 	remoteRoot = filepath.Clean(remoteRoot)
-	matcher, err := config.LoadIgnoreFile(nil, filepath.Join(remoteRoot, ".lgignore"))
+	matcher, err := config.LoadIgnoreFile(ignore, filepath.Join(remoteRoot, ".lgignore"))
 	if err != nil {
 		return nil, err
 	}
-	// The tmux server socket MUST live on a local filesystem. Source home dirs
-	// are often NFS/AFS (e.g. CS lab machines), where Unix-domain sockets don't
-	// work — tmux's `new-session -d` appears to succeed but the server can't
-	// persist. Use a per-uid socket under the local temp dir instead of ~/.lg.
-	tmuxSock := filepath.Join(os.TempDir(), fmt.Sprintf("lg-tmux-%d.sock", os.Getuid()))
 	return &Server{
 		remoteRoot: remoteRoot,
 		matcher:    matcher,
 		file:       NewFileServer(remoteRoot, matcher),
-		tmux:       newTmuxManager(tmuxSock),
-		pty:        newPTYHub(newTmuxManager(tmuxSock)),
+		exec:       newExecHub(remoteRoot),
 	}, nil
 }
 
@@ -93,28 +87,22 @@ func (s *Server) dispatch(stream *yamux.Stream, kind transport.StreamKind) {
 		ep.SetHandler(s.file.Handle)
 		go ep.Serve()
 	case transport.StreamPTYCtl:
-		go s.pty.serveControl(stream)
+		go s.exec.serveControl(stream)
 	case transport.StreamPTY:
-		go s.pty.serveData(stream)
+		go s.exec.serveData(stream)
 	default:
 		logx.For("agent").Warn("unknown stream kind", "kind", kind)
 		_ = stream.Close()
 	}
 }
 
-// handleControl answers health pings and session-list queries.
+// handleControl answers health pings.
 func (s *Server) handleControl(f proto.Frame) (proto.MsgType, any, bool, error) {
 	switch f.Type {
 	case proto.TypePing:
 		var p proto.Ping
 		_ = proto.Unmarshal(f.Body, &p)
 		return proto.TypePong, proto.Pong{Nonce: p.Nonce}, true, nil
-	case proto.TypeSessionList:
-		sessions, err := s.tmux.list()
-		if err != nil {
-			return 0, nil, true, err
-		}
-		return proto.TypeSessionsRsp, proto.SessionsResp{Sessions: sessions}, true, nil
 	default:
 		return 0, nil, false, nil
 	}

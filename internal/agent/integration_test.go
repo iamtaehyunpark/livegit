@@ -3,12 +3,15 @@ package agent
 import (
 	"bufio"
 	"context"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/taehyun/lg/internal/proto"
 	"github.com/taehyun/lg/internal/transport"
 )
@@ -22,7 +25,7 @@ func TestEndToEndOverPipe(t *testing.T) {
 
 	ghostConn, sourceConn := net.Pipe()
 
-	srv, err := NewServer(root)
+	srv, err := NewServer(root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,5 +118,94 @@ func TestEndToEndOverPipe(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(root, "sub/new.txt"))
 	if err != nil || string(got) != "written" {
 		t.Fatalf("written file=%q err=%v", got, err)
+	}
+
+	// Full-tree metadata: the whole tree comes back in one request, including the
+	// file we just wrote — the OneDrive-style eager listing.
+	treeF, err := file.Call(ctx, proto.TypeTreeReq, proto.TreeReq{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr proto.TreeResp
+	proto.Unmarshal(treeF.Body, &tr)
+	seen := map[string]bool{}
+	for _, e := range tr.Entries {
+		seen[e.Rel] = true
+	}
+	if !seen["hello.txt"] || !seen["sub/new.txt"] || !seen["sub"] {
+		t.Fatalf("tree missing entries: %+v", tr.Entries)
+	}
+
+	// Command runner: run a command in a remote PTY and read its output back.
+	out, exitCode := runExecOverPipe(t, sess, ctx, "printf hello-exec", "")
+	if exitCode != 0 || !strings.Contains(out, "hello-exec") {
+		t.Fatalf("exec: code=%d out=%q", exitCode, out)
+	}
+
+	// Cwd: a command runs in the requested rel subdir (remote_root/sub), so that
+	// `lg ls` under <mount>/sub lists Source's <repo>/sub. `sub` exists from the
+	// earlier write of sub/new.txt.
+	out, exitCode = runExecOverPipe(t, sess, ctx, "pwd", "sub")
+	if exitCode != 0 || !strings.Contains(out, "/sub") {
+		t.Fatalf("exec with cwd=sub: code=%d out=%q (want a path ending in /sub)", exitCode, out)
+	}
+}
+
+// runExecOverPipe drives one ExecReq/ExecExit round-trip against the server's
+// exec hub (in rel dir cwd) and returns the streamed output plus the exit code.
+func runExecOverPipe(t *testing.T, sess *yamux.Session, ctx context.Context, cmd, cwd string) (string, int) {
+	t.Helper()
+	ctlStream, err := transport.OpenStream(sess, transport.StreamPTYCtl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataStream, err := transport.OpenStream(sess, transport.StreamPTY)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctl := transport.NewEndpoint(ctlStream)
+	exitCh := make(chan int, 1)
+	ctl.SetHandler(func(f proto.Frame) (proto.MsgType, any, bool, error) {
+		if f.Type == proto.TypeExecExit {
+			var ex proto.ExecExit
+			proto.Unmarshal(f.Body, &ex)
+			select {
+			case exitCh <- ex.Code:
+			default:
+			}
+		}
+		return 0, nil, false, nil
+	})
+	go ctl.Serve()
+
+	resp, err := ctl.Call(ctx, proto.TypeExecReq, proto.ExecReq{Cmd: cmd, Cwd: cwd, Cols: 80, Rows: 24, Term: "xterm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var er proto.ExecResp
+	proto.Unmarshal(resp.Body, &er)
+	if _, err := io.WriteString(dataStream, er.Token+"\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drain output until the stream closes (process exit).
+	out := make([]byte, 0, 64)
+	buf := make([]byte, 256)
+	for {
+		n, rerr := dataStream.Read(buf)
+		out = append(out, buf[:n]...)
+		if rerr != nil {
+			break
+		}
+		if len(out) > 4096 {
+			break
+		}
+	}
+	select {
+	case code := <-exitCh:
+		return string(out), code
+	case <-time.After(2 * time.Second):
+		t.Fatal("no ExecExit received")
+		return "", -1
 	}
 }

@@ -11,8 +11,8 @@ import (
 )
 
 // routeLogsToFile sends lg's own logs to ~/.lg/lg.log instead of the terminal,
-// so background reconnect/health noise from long-running commands (shell,
-// enter-source) doesn't spam the user's shell. Returns the log path.
+// so background reconnect/health noise from long-running commands (shell, run)
+// doesn't spam the user's shell. Returns the log path.
 func routeLogsToFile(c *config.Config) string {
 	path := config.LogPath()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -42,18 +42,11 @@ func newClient(c *config.Config) *transport.Client {
 	return client
 }
 
-// openState opens the SQLite state store and journal for the ghost side.
-func openGhostStores() (*fuse.StateStore, *fuse.Journal, error) {
-	store, err := fuse.OpenState(config.StateDBPath())
-	if err != nil {
-		return nil, nil, err
-	}
-	journal, err := fuse.OpenJournal(config.JournalPath())
-	if err != nil {
-		_ = store.Close()
-		return nil, nil, err
-	}
-	return store, journal, nil
+// openGhostJournal opens the write-through journal for the ghost side. (The
+// full-tree metadata index is owned by the FUSE backend and persisted as a
+// snapshot — no separate SQLite store anymore.)
+func openGhostJournal() (*fuse.Journal, error) {
+	return fuse.OpenJournal(config.JournalPath())
 }
 
 // buildMatcher loads ignore patterns from config + ~/.lg or repo .lgignore.

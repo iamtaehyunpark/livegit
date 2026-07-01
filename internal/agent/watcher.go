@@ -69,18 +69,22 @@ func (w *Watcher) handle(ev fsnotify.Event) {
 	if w.matcher != nil && w.matcher.Match(rel, isDir) {
 		return // ignored path; no push
 	}
-	// Newly created directories must be watched too.
+	// Newly created directories must be watched recursively. Still push the
+	// invalidate below so Ghost's full-tree index learns about the new dir.
 	if isDir && ev.Op&(fsnotify.Create) != 0 {
 		w.addRecursive(ev.Name)
-		return
 	}
-	inv := proto.Invalidate{Rel: rel}
+	inv := proto.Invalidate{Rel: rel, IsDir: isDir}
 	if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		inv.Deleted = true
-	} else if statErr == nil && !isDir {
+	} else if statErr == nil {
 		inv.ModTime = info.ModTime().Unix()
-		if h, err := hashx.File(ev.Name); err == nil {
-			inv.Hash = h
+		inv.Mode = uint32(info.Mode().Perm())
+		if !isDir {
+			inv.Size = info.Size()
+			if h, err := hashx.File(ev.Name); err == nil {
+				inv.Hash = h
+			}
 		}
 	}
 	if w.notify != nil {

@@ -3,8 +3,13 @@ package fuse
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"sort"
 	"time"
+
+	"github.com/taehyun/lg/internal/config"
 )
 
 // Barrier sentinel errors.
@@ -13,84 +18,89 @@ var (
 	ErrBarrierOffline = errors.New("flush barrier: went offline")
 )
 
-// RunEviction is the LRU eviction daemon (§4.2). Periodically it returns cached,
-// idle, non-dirty files to ghost state by deleting their local content. live
-// files and files with pending journal entries are never evicted.
+// cachedFile is one materialized content file on local disk.
+type cachedFile struct {
+	rel    string
+	size   int64
+	atime  time.Time
+}
+
+// RunEviction periodically keeps the on-disk content cache under the configured
+// size cap. Unlike the old model, eviction only removes *content* bytes — the
+// full-tree metadata index always stays complete, so an evicted file is still
+// listed with its real size and simply refetches on next open (§2.2).
 func (b *Backend) RunEviction(ctx context.Context) {
-	interval := time.Minute
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-b.stop:
 			return
-		case <-time.After(interval):
+		case <-time.After(time.Minute):
 			b.EvictOnce()
 		}
 	}
 }
 
-// EvictOnce performs one eviction sweep. Exposed for tests.
+// EvictOnce performs one size-cap sweep. Exposed for tests.
 func (b *Backend) EvictOnce() {
-	idle := time.Duration(b.cfg.Cache.EvictAfterIdleMinutes) * time.Minute
-	cutoff := time.Now().Add(-idle).Unix()
-	candidates, err := b.store.EvictCandidates(cutoff)
-	if err != nil {
-		b.log.Warn("evict query failed", "err", err)
-		return
-	}
-	for _, m := range candidates {
-		if b.journal.HasPending(m.Path) {
-			continue // §4.2: never evict while unflushed entries remain
-		}
-		cp := b.cachePath(m.Path)
-		if err := os.Remove(cp); err != nil && !os.IsNotExist(err) {
-			b.log.Warn("evict remove failed", "rel", m.Path, "err", err)
-			continue
-		}
-		if err := b.store.SetState(m.Path, StateGhost); err != nil {
-			b.log.Warn("evict state update failed", "rel", m.Path, "err", err)
-			continue
-		}
-		b.log.Debug("evicted to ghost", "rel", m.Path, "bytes", m.SizeBytes)
-	}
-	b.enforceSizeCap()
-}
-
-// enforceSizeCap evicts the least-recently-accessed cached files until total
-// materialized size is under max_cache_size_gb (§4.2 disk-pressure trigger).
-func (b *Backend) enforceSizeCap() {
-	capBytes := int64(b.cfg.Cache.MaxCacheSizeGB) << 30
+	capBytes := b.capBytes()
 	if capBytes <= 0 {
 		return
 	}
-	total, err := b.store.CachedSizeBytes()
-	if err != nil || total <= capBytes {
+	files, total := b.scanCache()
+	if total <= capBytes {
 		return
 	}
-	// Evict oldest cached entries regardless of idle threshold until under cap.
-	candidates, err := b.store.EvictCandidates(time.Now().Unix())
-	if err != nil {
-		return
-	}
-	for _, m := range candidates {
+	// Evict least-recently-accessed content first, skipping files with unflushed
+	// edits (their bytes are the only copy until the flush worker pushes them).
+	sort.Slice(files, func(i, j int) bool { return files[i].atime.Before(files[j].atime) })
+	for _, f := range files {
 		if total <= capBytes {
 			break
 		}
-		if b.journal.HasPending(m.Path) {
+		if b.journal.HasPending(f.rel) {
 			continue
 		}
-		if err := os.Remove(b.cachePath(m.Path)); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(b.cachePath(f.rel)); err != nil && !os.IsNotExist(err) {
 			continue
 		}
-		_ = b.store.SetState(m.Path, StateGhost)
-		total -= m.SizeBytes
-		b.log.Debug("evicted under size cap", "rel", m.Path)
+		b.index.SetHaveContent(f.rel, false)
+		total -= f.size
+		b.log.Debug("evicted cached content", "rel", f.rel, "bytes", f.size)
 	}
 }
 
-// CacheUsage reports total materialized bytes (for `lg status`).
-func (b *Backend) CacheUsage() (int64, error) { return b.store.CachedSizeBytes() }
+// scanCache walks the content cache directory and returns each file plus the
+// total bytes used.
+func (b *Backend) scanCache() ([]cachedFile, int64) {
+	var files []cachedFile
+	var total int64
+	_ = filepath.WalkDir(b.cacheDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		relPath, rerr := filepath.Rel(b.cacheDir, p)
+		if rerr != nil {
+			return nil
+		}
+		files = append(files, cachedFile{
+			rel:   config.Rel(filepath.ToSlash(relPath)),
+			size:  info.Size(),
+			atime: info.ModTime(),
+		})
+		total += info.Size()
+		return nil
+	})
+	return files, total
+}
 
-// Stop signals background workers to exit.
-func (b *Backend) Stop() { close(b.stop) }
+// CacheUsage reports total materialized bytes (for `lg status`).
+func (b *Backend) CacheUsage() (int64, error) {
+	_, total := b.scanCache()
+	return total, nil
+}

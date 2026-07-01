@@ -32,18 +32,20 @@ func (c *sshConn) Close() error {
 }
 
 // dialSSH dispatches to the configured transport. "system" (default) shells out
-// to the real `ssh` binary so ~/.ssh/config applies; "native" uses the Go ssh
-// client.
+// to the real `ssh` binary so ~/.ssh/config applies; the native Go ssh client is
+// used for "native" mode and always for password auth (the system `ssh` binary
+// can't answer a prompt from lg's non-interactive launch).
 func dialSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
-	if cfg.Source.SSHMode == "native" {
+	if cfg.Source.SSHMode == "native" || cfg.Source.Auth == "password" {
 		return dialNativeSSH(cfg, remoteBin)
 	}
 	return dialSystemSSH(cfg, remoteBin)
 }
 
-// dialNativeSSH connects with the built-in Go ssh client (ignores ~/.ssh/config).
-func dialNativeSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
-	auths, err := authMethods()
+// nativeClient builds and connects the built-in Go ssh client (ignores
+// ~/.ssh/config). Shared by the streaming dial and the init-time agent deploy.
+func nativeClient(cfg *config.Config) (*ssh.Client, error) {
+	auths, err := authMethods(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +72,15 @@ func dialNativeSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
+	return client, nil
+}
+
+// dialNativeSSH connects with the native client and starts the remote agent.
+func dialNativeSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
+	client, err := nativeClient(cfg)
+	if err != nil {
+		return nil, err
+	}
 	session, err := client.NewSession()
 	if err != nil {
 		_ = client.Close()
@@ -87,10 +98,17 @@ func dialNativeSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 		_ = client.Close()
 		return nil, err
 	}
-	// Stream stderr to our stderr for remote-agent diagnostics.
-	session.Stderr = os.Stderr
+	// Route the remote agent's stderr (its own logs / startup diagnostics) to the
+	// lg log file, NOT the user's terminal — otherwise it pollutes the output of
+	// every `lg <cmd>` (and tempts a `| grep` filter that would mask exit codes).
+	// This matches dialSystemSSH. Diagnostics are still in ~/.lg/lg.log.
+	if lf, ferr := os.OpenFile(config.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
+		session.Stderr = lf
+	} else {
+		session.Stderr = os.Stderr
+	}
 
-	cmd := fmt.Sprintf("%s serve --remote-root %q", remoteBin, cfg.Source.RemoteRoot)
+	cmd := remoteAgentCmd(remoteBin, cfg)
 	if err := session.Start(cmd); err != nil {
 		_ = session.Close()
 		_ = client.Close()
@@ -118,8 +136,7 @@ func dialSystemSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 	if cfg.Source.Port != 0 && cfg.Source.Port != 22 {
 		args = append(args, "-p", strconv.Itoa(cfg.Source.Port))
 	}
-	remoteCmd := fmt.Sprintf("%s serve --remote-root %s", remoteBin, shellQuote(cfg.Source.RemoteRoot))
-	args = append(args, target, remoteCmd)
+	args = append(args, target, remoteAgentCmd(remoteBin, cfg))
 
 	cmd := exec.Command("ssh", args...)
 	stdin, err := cmd.StdinPipe()
@@ -153,21 +170,60 @@ func dialSystemSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 	}, nil
 }
 
+// remoteAgentCmd builds the command run on Source to start the agent. It
+// prepends ~/.local/bin to PATH (the standard `lg` install location) so a bare
+// `agent_bin: "lg"` resolves even though a non-interactive ssh session's PATH
+// usually omits it — the most common setup pitfall. $HOME/$PATH are expanded by
+// the remote shell. A login shell is deliberately NOT used: that would run the
+// user's profile (MOTD, 2FA automation) and corrupt the binary yamux stream.
+func remoteAgentCmd(remoteBin string, cfg *config.Config) string {
+	cmd := fmt.Sprintf(`PATH="$HOME/.local/bin:$PATH" %s serve --remote-root %s`,
+		remoteBin, shellQuote(cfg.Source.RemoteRoot))
+	if ig := strings.Join(cfg.Ignore, ","); ig != "" {
+		cmd += " --ignore " + shellQuote(ig)
+	}
+	return cmd
+}
+
 // shellQuote single-quotes a string for safe embedding in the remote ssh command.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-func authMethods() ([]ssh.AuthMethod, error) {
+func authMethods(cfg *config.Config) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
-	// 1. ssh-agent, if available.
+
+	// Password auth (from the encrypted store) goes first when configured. Many
+	// servers deliver "password" via keyboard-interactive, so offer both and
+	// answer every challenge with the stored password.
+	if cfg.Source.Auth == "password" {
+		pw, err := config.LoadPassword()
+		if err != nil {
+			return nil, err
+		}
+		if pw == "" {
+			return nil, fmt.Errorf("auth=password but no stored password (run `lg init` to set it)")
+		}
+		methods = append(methods,
+			ssh.Password(pw),
+			ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
+				ans := make([]string, len(questions))
+				for i := range questions {
+					ans[i] = pw
+				}
+				return ans, nil
+			}),
+		)
+	}
+
+	// ssh-agent, if available.
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
 		if conn, err := net.Dial("unix", sock); err == nil {
 			ag := agent.NewClient(conn)
 			methods = append(methods, ssh.PublicKeysCallback(ag.Signers))
 		}
 	}
-	// 2. Default private keys under ~/.ssh.
+	// Default private keys under ~/.ssh.
 	home, _ := os.UserHomeDir()
 	for _, name := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
 		keyPath := filepath.Join(home, ".ssh", name)
@@ -182,7 +238,7 @@ func authMethods() ([]ssh.AuthMethod, error) {
 		methods = append(methods, ssh.PublicKeys(signer))
 	}
 	if len(methods) == 0 {
-		return nil, fmt.Errorf("no ssh auth methods available (no agent, no usable keys in ~/.ssh)")
+		return nil, fmt.Errorf("no ssh auth methods available (no password, agent, or usable keys in ~/.ssh)")
 	}
 	return methods, nil
 }

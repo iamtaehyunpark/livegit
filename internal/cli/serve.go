@@ -2,22 +2,27 @@ package cli
 
 import (
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/taehyun/lg/internal/agent"
 )
 
 // newServeCmd is the Source-side daemon, invoked by Ghost over ssh as
-// `lg serve --remote-root <path>` (see transport.dialSSH). It speaks the yamux
-// protocol over stdin/stdout.
+// `lg serve --remote-root <path> [--ignore <csv>]` (see transport.dialSSH). It
+// speaks the yamux protocol over stdin/stdout.
 func newServeCmd() *cobra.Command {
-	var remoteRoot string
+	var remoteRoot, ignore string
 	cmd := &cobra.Command{
 		Use:    "serve",
 		Short:  "Run the Source-side agent (spoken over ssh stdio)",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			srv, err := agent.NewServer(remoteRoot)
+			var patterns []string
+			if ignore != "" {
+				patterns = strings.Split(ignore, ",")
+			}
+			srv, err := agent.NewServer(remoteRoot, patterns)
 			if err != nil {
 				return err
 			}
@@ -26,6 +31,7 @@ func newServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&remoteRoot, "remote-root", "", "absolute repo path on Source (required)")
+	cmd.Flags().StringVar(&ignore, "ignore", "", "comma-separated ignore patterns (from Ghost config)")
 	_ = cmd.MarkFlagRequired("remote-root")
 	return cmd
 }

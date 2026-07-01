@@ -4,3 +4,6 @@
 /dist/
 # Local lg state (if a developer runs it in-tree)
 /.lg/
+
+# Embedded linux agents (built by `make agents`, not committed)
+internal/agentbin/data/lg-linux-*
