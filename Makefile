@@ -29,12 +29,21 @@ docs:
 
 ## agents: cross-compile the Linux agent binaries embedded into the host binary
 ## (so `lg init` can deploy a matching agent to a passworded Source).
+##
+## The agents are built into a STAGING dir with $(AGENTDIR) EMPTY, then copied
+## in. This is deliberate: the Linux agent must NOT embed the agent binaries
+## (only the host binary deploys agents). Building straight into $(AGENTDIR)
+## makes each build embed the previous binaries — geometric growth that blows
+## past the linker's 2 GiB section limit after enough rebuilds.
+AGENTSTAGE := bin/agents
 agents:
-	@mkdir -p $(AGENTDIR)
+	@rm -f $(AGENTDIR)/lg-linux-*        # empty the embed dir so agents embed nothing
+	@mkdir -p $(AGENTSTAGE) $(AGENTDIR)
 	@for arch in amd64 arm64; do \
 	  CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -ldflags "$(LDFLAGS)" \
-	    -o $(AGENTDIR)/lg-linux-$$arch $(PKG); \
+	    -o $(AGENTSTAGE)/lg-linux-$$arch $(PKG); \
 	done
+	@cp $(AGENTSTAGE)/lg-linux-amd64 $(AGENTSTAGE)/lg-linux-arm64 $(AGENTDIR)/
 	@echo "embedded linux agents ($(VERSION)) in $(AGENTDIR)"
 
 ## build: compile the binary into ./bin/lg (embeds the Linux agents + guides)
