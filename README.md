@@ -174,6 +174,42 @@ given host.
 
 ---
 
+## Working with a coding agent
+
+`lg` turns a coding agent (Claude Code, and similar CLIs) into something that can
+*use your GPU box as if it were the local machine* — write code locally, run it
+remotely, watch it, iterate.
+
+When you run `lg init`, it drops an **`AGENTS.md`** into your project root (next
+to `GUIDE.md`) — a concise operating guide that teaches an agent how to drive
+`lg`: how to run things on the server, how output streams, how the local↔remote
+paths map, and how to edit files the right way. Point your agent at it once and
+it behaves as if it natively understood the split between your laptop and the
+server — no hand-holding per command.
+
+A typical loop looks like this. Link a server-side repo — even an empty one —
+with `lg init`, mount it with `lg shell`, then start your agent in the mounted
+folder on your laptop. From there the agent can:
+
+- **Edit code with its normal file tools**, right in the mounted folder — changes
+  sync to the server automatically. If a mount write ever fails, `AGENTS.md` has
+  it fall back to writing the file server-side over `lg`, so editing never gets
+  stuck.
+- **Run the experiment on the server** (`lg python train.py`) and read the
+  **live streamed output** as it runs — the same bytes you'd see over `ssh`.
+- **Launch long runs as detached jobs and monitor them.** The job keeps running
+  on the server even if your laptop sleeps, the connection drops, or the `lg`
+  Ghost process exits entirely — nothing is lost. The agent (or you) reconnects
+  later and tails the logs with `lg logs -f`.
+- **Debug, plot results, and iterate** — reading files, re-running, inspecting
+  artifacts — all from the local machine.
+
+The net effect: the agent gets a remote server's compute with a fast, local
+edit-and-inspect loop, and it "just works" from the first prompt because
+`AGENTS.md` gives it the operating manual.
+
+---
+
 ## Everyday commands
 
 | Command | What it does |
