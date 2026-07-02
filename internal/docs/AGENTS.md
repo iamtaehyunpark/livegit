@@ -42,8 +42,10 @@ lg config get local_root            # the local mount folder (named after the re
 ```
 
 If `lg status` / any `lg <cmd>` prints `not an lg project`, you are in the wrong
-directory — find the project (look for a `.lg/` dir) and `cd` there. If it prints
-`not connected …`, see [Failures](#failures--diagnosis--fix).
+directory — find the project (look for a `.lg/` dir) and `cd` there. `lg scan`
+lists every lg project on the machine and its connection state, which is a quick
+way to locate one. If a command prints `not connected …`, see
+[Failures](#failures--diagnosis--fix).
 
 A project looks like:
 ```
@@ -195,6 +197,7 @@ Change settings later: `lg config set <key> <value>` (e.g.
 |---|---|---|
 | `not an lg project — run 'lg init'` | Your cwd isn't under a `.lg/`. | `cd` into the project (find the dir with `.lg/`). Don't `lg init` unless you're sure there's no project. |
 | `lg: not connected to <host> …` | Couldn't reach/authenticate the server, or the agent is missing. | Read `<project>/.lg/lg.log` (last lines). Common causes below. |
+| `lg: not connected … run \`lg connect\`` | The server needs interactive 2FA/Duo authentication you can't answer. | **A human step** — ask the human to run `lg connect` and approve the Duo prompt. It caches the connection for hours; then your `lg <cmd>`s work. Check readiness with `lg connect --check` (safe, read-only). Do NOT run bare `lg connect` yourself — it may block on a prompt you can't answer. |
 | log shows `lg: command not found` | Agent not installed on the server. | A human runs `lg init` again (it re-deploys), or deploy manually. |
 | log shows `Permission denied` / auth failure | Key not accepted / password needed / wrong user. | Human sets up key or re-runs `lg init --auth password`. |
 | `Permission denied` writing a file (remote) | Server-side Unix perms — repo owned by another user. | Not an lg problem. Report it; the human fixes ownership/group or connects as the owner. |
@@ -221,6 +224,8 @@ fails. Find it via `lg config path` (config is next to the log).
 - Don't pipe content into `lg run` via stdin (PTY EOF can hang).
 - Don't run `lg init` blindly — check for an existing `.lg/` first.
 - Don't try to supply an ssh password yourself; that's a human step.
+- Don't run bare `lg connect` on a 2FA/Duo host (it may block on a prompt you
+  can't answer) — ask the human. `lg connect --check` is safe.
 
 ---
 

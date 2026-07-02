@@ -133,21 +133,39 @@ lg toggle        # back to a normal local shell   (or: lg local)
 
 ---
 
-## Authentication — log in once, never again
+## Authentication — log in once, reuse it for hours
+
+`lg` keeps **one** authenticated ssh connection to the server and runs every
+command over it, so there's no per-command login.
 
 - **SSH key / agent (default):** `lg` uses the system `ssh`, so your
   `~/.ssh/config` applies in full — host aliases, ProxyJump/bastions,
-  IdentityFile, and **ControlMaster** (so 2FA/Duo is entered once and reused,
-  never re-prompted). This is the right choice for lab/2FA servers.
+  IdentityFile, known_hosts. On a key-only host you never see a prompt.
+- **2FA / Duo hosts:** the first connection needs your approval (a Duo push or a
+  passcode). `lg` owns a dedicated, reusable ssh connection and authenticates it
+  **once** with `lg connect`, then caches it for `source.control_persist`
+  (default **8 hours**) and reuses it for every later `lg <cmd>`, `lg run`, and
+  `lg shell` — no more prompts until it expires.
+
+  ```sh
+  lg connect            # approve the Duo prompt once; cached for 8h
+  lg connect --check    # is the connection live?
+  lg connect --stop     # close it (the next command re-authenticates)
+  ```
+
+  You rarely run `lg connect` by hand: on a terminal, `lg <cmd>` and `lg shell`
+  bring the connection up for you (you'll just see the Duo prompt inline the
+  first time). Run it explicitly to pre-authenticate — e.g. before a scripted
+  run, or so a tool that can't answer a Duo prompt finds the connection ready.
 - **Password:** for hosts that only take a password and where you can't use a
   key. `lg init` (or `--auth password`) prompts once and stores the password
   **encrypted** at `<project>/.lg/credentials` (AES-GCM, with a key derived from
   your machine — copying the file to another computer won't decrypt it). It's
   never written in plaintext and never in `config.yaml`. lg then authenticates
-  automatically with the built-in ssh client.
+  automatically with the built-in ssh client (no ssh master needed).
 
-Either way, after the first successful setup you should never see a prompt again
-across laptop sleep, wifi changes, or restarting `lg`.
+After the first login you shouldn't see another prompt for hours — across laptop
+sleep, wifi changes, or restarting `lg` — until the cached window expires.
 
 ---
 
@@ -158,8 +176,10 @@ across laptop sleep, wifi changes, or restarting `lg`.
 | `lg <cmd>` | Run `<cmd>` on the server (streamed, exit code, PTY). |
 | `lg run -- <cmd>` | Same, explicit form (use when `<cmd>` clashes with a subcommand). |
 | `lg shell` | Mount the repo folder + start your shell. `exit` to leave. |
+| `lg connect` | Authenticate to the server once (handles Duo/2FA); reused for hours. `--check` / `--stop`. |
 | `lg toggle` / `lg local` | Turn "everything runs on the server" on / off. |
 | `lg status` | Connection state, toggle, tree-sync freshness, cache, pending writes. |
+| `lg scan [dir]` | List every lg project on this machine (default `$HOME`) and its connection state. |
 | `lg config show` | Print the active project's config. |
 | `lg config set <key> <val>` | Change a setting (e.g. `lg config set source.port 2222`). |
 | `lg config edit` | Open the config in `$EDITOR` (for list values like `ignore`). |
@@ -180,6 +200,7 @@ Settings live in `<project>/.lg/config.yaml`. Change scalars with
 | `source.remote_root` | Absolute repo path on the server. |
 | `source.ssh_mode` | `system` (default, honors ~/.ssh/config) or `native` (built-in client). |
 | `source.auth` | `` (key/agent) or `password` (uses the encrypted store, native ssh). |
+| `source.control_persist` | How long the cached ssh connection lives after last use (default `8h`). Longer = fewer 2FA prompts. `system` mode only. |
 | `source.agent_bin` | Path to `lg` on the server; default `lg` (resolved from `~/.local/bin`). |
 | `local_root` | The mount folder (set for you at init, named after the repo). |
 | `ignore` | Patterns never synced/listed (`.venv/`, `node_modules/`, `.DS_Store`, `*.pt`, …). Keeps the tree fast and clean. |
@@ -197,6 +218,7 @@ uses that one. Outside any project, `lg` says "not an lg project — run `lg ini
 | Symptom | Fix |
 |---|---|
 | `not connected …` right after start | The agent likely isn't on the server, or auth failed. Re-run `lg init` (it re-deploys the agent); check `lg status`; look at `<project>/.lg/lg.log`. |
+| `not connected … run \`lg connect\`` (2FA/Duo host) | The cached connection expired or was never established — run `lg connect` and approve the prompt, then retry. `lg connect --check` shows the state. |
 | Mount is empty | The tree is still syncing (large repos take a few seconds — watch `lg.log` for `tree synced`), or you're not connected. |
 | `lg shell` won't stop / stale mount | `lg unmount`. `lg shell` also auto-recovers stale mounts on start. |
 | Permission denied writing files | Server-side: the repo may be owned by a different user. Fix ownership/group on the server, or connect as the owning account. |
