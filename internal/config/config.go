@@ -42,6 +42,12 @@ type Config struct {
 		//     via the built-in Go ssh client. Forces native mode, since the system
 		//     `ssh` binary can't answer a prompt from lg's non-interactive launch.
 		Auth string `yaml:"auth"`
+		// ControlPersist is how long lg's own ssh master (system mode only) stays
+		// alive after the last connection closes. Longer = a Duo/2FA host is
+		// authenticated once and reused for that whole window, so `lg connect`
+		// (and the prompt it triggers) is rare. ssh duration syntax: "8h", "30m",
+		// or "yes" (until reboot). Default "8h".
+		ControlPersist string `yaml:"control_persist"`
 	} `yaml:"source"`
 
 	LocalRoot string `yaml:"local_root"` // absolute path of the FUSE mount on Ghost
@@ -199,6 +205,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Source.SSHMode == "" {
 		c.Source.SSHMode = "system"
+	}
+	if c.Source.ControlPersist == "" {
+		c.Source.ControlPersist = "8h"
 	}
 	if c.Cache.EvictAfterIdleMinutes == 0 {
 		c.Cache.EvictAfterIdleMinutes = 30

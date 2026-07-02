@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
@@ -13,25 +14,32 @@ import (
 // embedded in this build. (internal/agentbin.Pick satisfies this.)
 type AgentPicker func(goarch string) []byte
 
-// EnsureAgent connects to Source (native ssh — password auth if configured) and
-// makes sure the `lg` agent is installed at ~/.local/bin/lg, uploading the
-// matching embedded Linux binary if it's missing. It returns a human-readable
-// summary of what it did. Used by `lg init`.
+// sshRunner runs one command on Source, optionally feeding stdin, returning
+// stdout. It abstracts over the two transports so EnsureAgent doesn't care which.
+type sshRunner func(cmd string, stdin *bytes.Reader) (string, error)
+
+// EnsureAgent makes sure the `lg` agent is installed at ~/.local/bin/lg on
+// Source, uploading the matching embedded Linux binary if it's missing, and
+// returns a human-readable summary. Used by `lg init`.
+//
+// In system-ssh mode it runs over lg's ControlMaster (reusing the connection
+// `lg connect` / `lg init` just authenticated), so it works on a Duo/2FA host
+// without a second prompt. In native/password mode it uses the Go ssh client.
 func EnsureAgent(cfg *config.Config, pick AgentPicker) (string, error) {
-	client, err := nativeClient(cfg)
+	run, closeFn, err := agentRunner(cfg)
 	if err != nil {
 		return "", err
 	}
-	defer client.Close()
+	defer closeFn()
 
 	// Already installed? (bare `lg` on PATH, or the standard install location.)
-	if out, _ := runSSH(client, `command -v lg 2>/dev/null || (test -x "$HOME/.local/bin/lg" && echo "$HOME/.local/bin/lg")`, nil); strings.TrimSpace(out) != "" {
-		ver, _ := runSSH(client, `PATH="$HOME/.local/bin:$PATH" lg --version 2>/dev/null`, nil)
+	if out, _ := run(`command -v lg 2>/dev/null || (test -x "$HOME/.local/bin/lg" && echo "$HOME/.local/bin/lg")`, nil); strings.TrimSpace(out) != "" {
+		ver, _ := run(`PATH="$HOME/.local/bin:$PATH" lg --version 2>/dev/null`, nil)
 		return "agent already installed on Source (" + strings.TrimSpace(ver) + ")", nil
 	}
 
 	// Pick the binary for the remote architecture.
-	unameOut, err := runSSH(client, "uname -m", nil)
+	unameOut, err := run("uname -m", nil)
 	if err != nil {
 		return "", fmt.Errorf("probe remote arch: %w", err)
 	}
@@ -46,18 +54,55 @@ func EnsureAgent(cfg *config.Config, pick AgentPicker) (string, error) {
 	// Upload: pipe the bytes into a temp file, chmod, atomic rename.
 	upload := `mkdir -p "$HOME/.local/bin" && cat > "$HOME/.local/bin/lg.tmp" && ` +
 		`chmod +x "$HOME/.local/bin/lg.tmp" && mv -f "$HOME/.local/bin/lg.tmp" "$HOME/.local/bin/lg"`
-	if _, err := runSSH(client, upload, bytes.NewReader(agent)); err != nil {
+	if _, err := run(upload, bytes.NewReader(agent)); err != nil {
 		return "", fmt.Errorf("upload agent: %w", err)
 	}
-	ver, err := runSSH(client, `PATH="$HOME/.local/bin:$PATH" lg --version`, nil)
+	ver, err := run(`PATH="$HOME/.local/bin:$PATH" lg --version`, nil)
 	if err != nil {
 		return "", fmt.Errorf("uploaded, but the agent won't run: %w", err)
 	}
 	return fmt.Sprintf("deployed agent to ~/.local/bin/lg (linux-%s, %s)", goarch, strings.TrimSpace(ver)), nil
 }
 
-// runSSH runs one command over the client, optionally feeding stdin, returning
-// combined-ish stdout. Errors include remote stderr for diagnostics.
+// agentRunner picks the transport for EnsureAgent's commands: the system ssh
+// binary (over lg's master) for system mode, else the native Go client.
+func agentRunner(cfg *config.Config) (sshRunner, func(), error) {
+	if usesControlMaster(cfg) {
+		return func(cmd string, stdin *bytes.Reader) (string, error) {
+			return runSystemSSH(cfg, cmd, stdin)
+		}, func() {}, nil
+	}
+	client, err := nativeClient(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return func(cmd string, stdin *bytes.Reader) (string, error) {
+		return runSSH(client, cmd, stdin)
+	}, func() { _ = client.Close() }, nil
+}
+
+// runSystemSSH runs one command via the `ssh` binary over lg's ControlMaster.
+// BatchMode makes it fail fast if the master is down (rather than prompt), so the
+// caller should have established it first (EnsureMaster / lg connect).
+func runSystemSSH(cfg *config.Config, command string, stdin *bytes.Reader) (string, error) {
+	args := []string{"-T", "-o", "ControlMaster=auto", "-o", "BatchMode=yes"}
+	args = append(args, masterOpts(cfg)...)
+	args = append(args, portArgs(cfg)...)
+	args = append(args, sshTargetOf(cfg), command)
+	cmd := exec.Command("ssh", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+// runSSH runs one command over the native client, optionally feeding stdin,
+// returning stdout. Errors include remote stderr for diagnostics.
 func runSSH(client *ssh.Client, cmd string, stdin *bytes.Reader) (string, error) {
 	session, err := client.NewSession()
 	if err != nil {

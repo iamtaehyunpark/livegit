@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -66,6 +67,25 @@ func runRemote(args []string, localFallback, detach bool) int {
 		return 1
 	}
 	routeLogsToFile(cfg) // keep reconnect/health noise out of the terminal
+
+	// On a Duo/2FA host, make sure the ssh connection is authenticated first — the
+	// background dialer runs non-interactively and can't answer a prompt. For an
+	// explicit `lg <cmd>` on a terminal this bootstraps the connection inline
+	// (one Duo, then cached); with no terminal it returns ErrNeedConnect so we can
+	// tell the user to run `lg connect` instead of hanging. Auto-routed read
+	// commands (localFallback) skip this: they must never surprise the shell with
+	// a Duo prompt — they quietly fall back to the local command when Source is
+	// unreachable.
+	if !localFallback {
+		if err := transport.EnsureMaster(cfg); err != nil {
+			if errors.Is(err, transport.ErrNeedConnect) {
+				fmt.Fprintf(os.Stderr, "lg: not connected to %s — run `lg connect` first (handles Duo/2FA).\n", cfg.Source.Host)
+			} else {
+				fmt.Fprintf(os.Stderr, "lg: couldn't connect to %s: %v\n", cfg.Source.Host, err)
+			}
+			return 1
+		}
+	}
 
 	client := newClient(cfg)
 	defer client.Close()

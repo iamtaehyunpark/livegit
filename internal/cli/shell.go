@@ -3,6 +3,7 @@ package cli
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"github.com/iamtaehyunpark/livegit/internal/config"
 	"github.com/iamtaehyunpark/livegit/internal/fuse"
 	"github.com/iamtaehyunpark/livegit/internal/shell"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -38,6 +40,19 @@ func runShell() error {
 	if c.LocalRoot == "" {
 		name := filepath.Base(strings.TrimRight(c.Source.RemoteRoot, "/"))
 		c.LocalRoot = filepath.Join(filepath.Dir(config.Dir()), name)
+	}
+
+	// On a Duo/2FA host, authenticate before mounting so the (single) prompt is
+	// clean and up front, not buried under FUSE/connection noise — and so the
+	// background dialer, which can't answer a prompt, finds a live connection.
+	// Best-effort: if it can't (e.g. no terminal), warn and continue; the shell
+	// still mounts and the supervisor will connect once `lg connect` succeeds.
+	if err := transport.EnsureMaster(c); err != nil {
+		if errors.Is(err, transport.ErrNeedConnect) {
+			fmt.Fprintf(os.Stderr, "lg: not connected to %s yet — run `lg connect` (handles Duo/2FA); the mount will link up once it succeeds.\n", c.Source.Host)
+		} else {
+			fmt.Fprintf(os.Stderr, "lg: couldn't connect to %s: %v (continuing; will retry)\n", c.Source.Host, err)
+		}
 	}
 
 	// A previous `lg shell` killed without unmounting leaves a stale FUSE mount

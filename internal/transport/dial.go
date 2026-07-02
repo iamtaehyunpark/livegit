@@ -134,6 +134,16 @@ func dialSystemSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 		target = cfg.Source.User + "@" + target
 	}
 	args := []string{"-T"} // no pseudo-tty: we want a clean binary pipe
+	if usesControlMaster(cfg) {
+		// Reuse lg's authenticated master; never prompt on the data channel.
+		// ControlMaster=auto multiplexes over the existing socket (and, on a
+		// non-2FA host, creates+persists one from a key-only login). BatchMode
+		// makes a *missing* master fail fast — instead of hanging on a Duo prompt
+		// with nowhere to render — since the foreground command pre-establishes
+		// the master via EnsureMaster; a miss here means it dropped.
+		args = append(args, "-o", "ControlMaster=auto", "-o", "BatchMode=yes")
+		args = append(args, masterOpts(cfg)...)
+	}
 	if cfg.Source.Port != 0 && cfg.Source.Port != 22 {
 		args = append(args, "-p", strconv.Itoa(cfg.Source.Port))
 	}

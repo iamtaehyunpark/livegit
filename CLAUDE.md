@@ -92,6 +92,17 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   `command ls`. Set `auto_remote_commands: []` to disable. The zsh `accept-line`
   widget / bash DEBUG trap (`internal/shell/integration.go`) do the rewrite; the list
   is baked into the generated hook at `lg shell` start.
+- `lg connect` — authenticate to Source **once** (handles Duo/2FA), then reuse
+  the cached ssh connection for `source.control_persist` (default 8h). `lg <cmd>`
+  and `lg shell` auto-run this on a terminal; run it by hand to pre-authenticate
+  before a scripted/agent-driven run that can't answer a Duo prompt. `--check`
+  reports liveness; `--stop` closes it. No-op for native/password auth.
+- `lg scan [root]` — machine-wide view: walk the filesystem (default `$HOME`,
+  depth-capped, skipping dotdirs/`node_modules`/`~/Library`) for every
+  `.lg/config.yaml` and print each project's host, mode, and connection state
+  (`live`/`down`/`n/a native`). lg keeps **no global registry** (project-local
+  like git), so this is a bounded walk, not a lookup. `--connect` brings up the
+  connection for every reachable system-mode project; `--max-depth N` widens it.
 - `lg init` — interactive setup wizard (flags also work; `-i` forces wizard).
 - `lg config get|set|edit|show|path` — change settings safely (validates before save).
 - `lg shell` — mount the full-tree FUSE folder + run the user's shell (toggle hooks).
@@ -144,6 +155,29 @@ scope. Design (`internal/agent/jobs.go`):
   Required for lab/2FA servers.
 - **`native`**: built-in Go ssh client; ignores `~/.ssh/config`. Needs the host
   key in `~/.ssh/known_hosts`.
+
+### lg owns its own ControlMaster (Duo/2FA handled once)
+
+In `system` mode, lg no longer *depends on* a master the user brought up
+out-of-band — it manages its own (`internal/transport/controlmaster.go`):
+- Socket at `~/.ssh/lg-cm-%C` (ssh expands `~`/`%C`; short enough for macOS's
+  104-byte sun_path limit; keyed by host+port+user, so **one master is shared by
+  every lg project pointing at the same Source** — one Duo, many projects).
+- `lg connect` opens it **interactively** (terminal attached → Duo prompt visible)
+  via `ssh -o ControlMaster=auto <masterOpts> <target> true`; ControlPersist
+  (`source.control_persist`, default 8h) + `ServerAliveInterval` keep it alive.
+- **Data connections** (`dialSystemSSH`) add `-o ControlMaster=auto -o BatchMode=yes`
+  + the master opts: they multiplex over the live socket, or **fail fast** if it's
+  down (BatchMode never prompts → no hang on a Duo host with nowhere to render it).
+- `EnsureMaster` runs before the background dialer in `lg run`/`lg shell`: master
+  live → no-op; down + terminal → bootstrap interactively (auto `lg connect`);
+  down + no terminal (agent/script) → `ErrNeedConnect`, callers print
+  "run `lg connect`". `lg init` and `EnsureAgent` deploy over this master too, so
+  a Duo host is set up with a single prompt.
+- **Behavior change:** because lg uses its *own* socket path (not the user's
+  `~/.ssh/cm-…`), the first `lg` command in a fresh 8h window triggers one
+  `lg connect` (auto on a terminal) even if the user's shell master is up. That's
+  the intended decoupling — lg no longer relies on the login automation.
 
 ### Password auth + agent auto-deploy
 

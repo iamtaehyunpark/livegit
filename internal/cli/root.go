@@ -43,6 +43,8 @@ func NewRoot() *cobra.Command {
 	root.AddCommand(
 		newInitCmd(),
 		newConfigCmd(),
+		newConnectCmd(),
+		newScanCmd(),
 		newServeCmd(),
 		newShellCmd(),
 		newUnmountCmd(),

@@ -254,6 +254,18 @@ func writeConfig(in *wizardInput, skipConfirm bool) error {
 		}
 	}
 
+	// Authenticate the ssh connection first (system mode). On a Duo/2FA host this
+	// shows the prompt now, while we have the terminal, and caches the connection
+	// so the agent check below — and every later lg command — reuses it without a
+	// second prompt.
+	if c.Source.SSHMode != "native" && c.Source.Auth != "password" {
+		fmt.Printf("→ connecting to %s (approve the Duo/2FA prompt if one appears) …\n", sshTarget(c))
+		if err := transport.Connect(c); err != nil {
+			fmt.Fprintf(os.Stderr, "lg: couldn't connect (%v)\n", err)
+			fmt.Fprintf(os.Stderr, "    you can retry later with `lg connect`, then `lg init` to finish agent setup.\n")
+		}
+	}
+
 	// Confirm/deploy the agent on the remote (best-effort — a host needing an
 	// interactive step, e.g. Duo, may not be reachable non-interactively here).
 	fmt.Printf("→ checking the agent on %s …\n", sshTarget(c))

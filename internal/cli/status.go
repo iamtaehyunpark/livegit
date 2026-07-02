@@ -8,6 +8,7 @@ import (
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
 	"github.com/iamtaehyunpark/livegit/internal/shell"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 	"github.com/spf13/cobra"
 )
 
@@ -24,6 +25,16 @@ func newStatusCmd() *cobra.Command {
 			if c.Role == config.RoleGhost {
 				fmt.Printf("mount:       %s\n", c.LocalRoot)
 				fmt.Printf("source:      %s:%s\n", c.Source.Host, c.Source.RemoteRoot)
+
+				// ssh connection (Duo/2FA reuse) — system mode only; native/password
+				// carry credentials on every connection, so there's no master.
+				if c.Source.SSHMode != "native" && c.Source.Auth != "password" {
+					if transport.MasterLive(c) {
+						fmt.Printf("connection:  live (cached %s; new commands won't re-prompt)\n", transport.PersistLabel(c))
+					} else {
+						fmt.Println("connection:  down — run `lg connect` to authenticate (handles Duo/2FA)")
+					}
+				}
 			}
 
 			// Toggle mode (if invoked inside an lg shell).
