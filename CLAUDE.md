@@ -7,8 +7,8 @@ config. This file is the operational cheat-sheet for *working on and testing* lg
 **NOTE (Pivot v1.0):** the product was pivoted to two literal features. The old
 "smart unified shell" (trigger engine, LOCAL/SOURCE mode state machine,
 ghost/cached/live FUSE tri-state, persistent tmux sessions) is **deleted**.
-`README.md`/`GUIDE.md` still describe the old design and are stale — trust this
-file and the code. The two features now are:
+`README.md`, `GUIDE.md`, and `AGENTS.md` all describe the current v1.0 design.
+The two features now are:
 1. **Command runner** — `lg <command>` runs on Source in a PTY, streams output
    live, forwards Ctrl-C/SIGWINCH, propagates the exit code. `lg toggle` makes
    every command in the shell go remote until toggled off (no heuristics).
@@ -303,4 +303,3 @@ lg unmount; ssh galaxy-04 'pkill -f "lg serve"'`.
   `.git/` to config `ignore` if you want it out — git ops should run via `lg <cmd>`.
 - `lg toggle` uses the zsh/bash preexec hook; the bash DEBUG-trap path is
   best-effort (zsh is the reliable one). Toggle state is `~/.lg/run/<tab>.toggle`.
-- `README.md`/`GUIDE.md` still describe the pre-pivot product — rewrite them.
