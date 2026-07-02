@@ -16,7 +16,7 @@ GOBUILD     := CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)"
 # Platforms for `make release`.
 PLATFORMS   := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 
-.PHONY: build install uninstall test vet clean release agents docs
+.PHONY: build install uninstall test vet clean release agents docs publish
 
 AGENTDIR := internal/agentbin/data
 DOCSDIR  := internal/docs
@@ -87,6 +87,13 @@ vet:
 ## clean: remove build artifacts
 clean:
 	rm -rf bin dist
+
+## publish: cut a full release in one step — usage: make publish TAG=vX.Y.Z
+## Tags, builds release binaries, creates the GitHub release, regenerates the
+## Homebrew formula from the new checksums, and pushes it to the tap repo.
+publish:
+	@test -n "$(TAG)" || { echo "usage: make publish TAG=vX.Y.Z"; exit 1; }
+	@./scripts/publish-release.sh "$(TAG)"
 
 ## release: cross-compile static binaries for all platforms into ./dist
 release:
