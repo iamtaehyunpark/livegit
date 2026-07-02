@@ -1,6 +1,7 @@
 # Live Git (`lg`)
 
-**Work on your GPU/lab server as if its files were on your laptop.**
+**Work on your GPU/lab server as if its files were on your laptop — and let your
+coding agent do the same.**
 
 `lg` links a laptop (your **Ghost**) to a remote machine (your **Source**) and
 gives you two things that feel local but run remote:
@@ -13,6 +14,14 @@ gives you two things that feel local but run remote:
    real file sizes; the bytes of a file are fetched only when you open it.
 
 No syncing a whole repo up front, no `rsync` loops, no living in `ssh`.
+
+> **The real point: hand your remote server to a coding agent.** `lg init` drops
+> an `AGENTS.md` into your project, so an agent like Claude Code drives `lg` from
+> the very first prompt — editing code locally in the mounted repo, running
+> experiments on the GPU box and reading their live output, kicking off long jobs
+> that survive a disconnect, then debugging and plotting the results. It works
+> your server as if its compute were bolted to your laptop.
+> → [Working with a coding agent](#working-with-a-coding-agent)
 
 ```console
 $ lg python train.py --epochs 50      # runs on the GPU box, streams here live
