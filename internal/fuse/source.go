@@ -3,8 +3,8 @@ package fuse
 import (
 	"context"
 
-	"github.com/taehyun/lg/internal/proto"
-	"github.com/taehyun/lg/internal/transport"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 )
 
 // clientSource adapts a transport.Client to the SourceRPC interface the Backend

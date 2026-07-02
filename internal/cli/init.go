@@ -8,11 +8,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/iamtaehyunpark/livegit/internal/agentbin"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/docs"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/agentbin"
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/docs"
-	"github.com/taehyun/lg/internal/transport"
 	"golang.org/x/term"
 )
 

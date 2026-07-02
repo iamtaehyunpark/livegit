@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/logx"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // SourceRPC is the subset of the transport the Backend needs. An interface so
@@ -125,7 +125,7 @@ func (b *Backend) RunTreeSync(ctx context.Context) {
 
 // Materialize ensures rel has real local content, fetching from Source on demand
 // (the open() hook). Returns the local cache path. Offline with no cached copy
-// surfaces as an error so the OS reports "can't read, no connection" (§2.3).
+// surfaces as an error so the OS reports "can't read, no connection".
 func (b *Backend) Materialize(ctx context.Context, rel string) (string, error) {
 	rel = config.Rel(rel)
 	cp := b.cachePath(rel)

@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/iamtaehyunpark/livegit/internal/config"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/config"
 )
 
 // field is one settable config key, mapped to typed get/set on the Config

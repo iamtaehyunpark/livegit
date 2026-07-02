@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/iamtaehyunpark/livegit/internal/fuse"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/fuse"
 )
 
 // newUnmountCmd tears down the FUSE mount at local_root. Handy after a crash or

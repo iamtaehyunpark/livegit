@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // Endpoint runs the framed request/response protocol over one yamux stream.

@@ -3,11 +3,12 @@ package cli
 import (
 	"fmt"
 	"os"
+	"time"
 
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/fuse"
-	"github.com/taehyun/lg/internal/logx"
-	"github.com/taehyun/lg/internal/transport"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/fuse"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 )
 
 // routeLogsToFile sends lg's own logs to ~/.lg/lg.log instead of the terminal,
@@ -40,6 +41,24 @@ func newClient(c *config.Config) *transport.Client {
 	client := transport.NewClient(c, c.Source.AgentBin)
 	client.Start()
 	return client
+}
+
+// connectedClient loads the ghost config, dials Source, and blocks until the
+// link is online (or times out). The caller owns Close(). It's the shared setup
+// for the short-lived job commands (jobs/logs), which just need one RPC round
+// trip rather than the full shell/run machinery.
+func connectedClient(timeout time.Duration) (*transport.Client, error) {
+	cfg, err := loadGhost()
+	if err != nil {
+		return nil, err
+	}
+	routeLogsToFile(cfg)
+	client := newClient(cfg)
+	if err := waitOnline(client, timeout); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("not connected to %s (%v)", cfg.Source.Host, err)
+	}
+	return client, nil
 }
 
 // openGhostJournal opens the write-through journal for the ghost side. (The

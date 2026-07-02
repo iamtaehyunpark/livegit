@@ -7,8 +7,8 @@ import (
 )
 
 // PathMapper is the single source of truth for translating between the Ghost
-// FUSE mount (local_root) and Source's real tree (remote_root). Spec §7 lists
-// this as a cross-cutting helper shared by FUSE, watcher, and journal: get it
+// FUSE mount (local_root) and Source's real tree (remote_root). It is a
+// cross-cutting helper shared by FUSE, watcher, and journal: get it
 // right once here so the three never drift.
 //
 // Internally everything is keyed by a "rel" path: slash-separated, relative to

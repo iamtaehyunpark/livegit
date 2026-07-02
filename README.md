@@ -1,141 +1,253 @@
 # Live Git (`lg`)
 
-Real-time codebase sync + remote execution between a **Ghost** device (laptop)
-and a **Source** device (GPU server). Implements the v0.2 spec.
+**Work on your GPU/lab server as if its files were on your laptop.**
 
-- Edit on Ghost → propagates to Source via a journal-first async write-through.
-- The moment a venv / heavy compute is needed, the shell auto-switches into a
-  remote tmux session on Source.
-- Local disk only holds what's actually opened (ghost → cached → evicted, LRU).
+`lg` links a laptop (your **Ghost**) to a remote machine (your **Source**) and
+gives you two things that feel local but run remote:
+
+1. **Run any command on the server, inline.** Prefix it with `lg` and it runs on
+   Source, streaming live in a real terminal — colors, progress bars, Ctrl-C,
+   the works — and exits with the remote command's own exit code.
+2. **Browse the whole remote tree in your own editor.** `lg shell` mounts the
+   entire server repo on your laptop. The full folder shows up instantly with
+   real file sizes; the bytes of a file are fetched only when you open it.
+
+No syncing a whole repo up front, no `rsync` loops, no living in `ssh`.
+
+```console
+$ lg python train.py --epochs 50      # runs on the GPU box, streams here live
+Epoch 1/50  loss=2.31  ██░░░░░░░░  (Ctrl-C reaches the remote process)
+...
+
+$ lg nvidia-smi                       # one-off remote command
+$ code .                              # your editor, browsing the server's tree
+$ echo $?                             # the remote exit code came back
+```
+
+---
 
 ## Install
 
-`lg` is a single self-contained native binary. **You do not need Go (or any
-compiler) to run it** — only to build it from source. Once installed it behaves
-like any other CLI (`rg`, `fzf`, `gh`): you just type `lg`.
+`lg` is a single self-contained binary. **You don't need Go (or any compiler) to
+run it** — only to build from source. Once installed it behaves like any other
+CLI (`rg`, `fzf`, `gh`): you just type `lg`.
 
-**Option 1 — one-line installer (prebuilt binary, no Go):**
+**One-line installer (prebuilt binary):**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/iamtaehyunpark/livegit/main/install.sh | sh
 ```
 
-**Option 2 — Homebrew (via a tap):**
+**Homebrew (via tap):**
 
 ```sh
 brew tap iamtaehyunpark/livegit
 brew install lg
 ```
 
-(see `Formula/lg.rb` for publishing the tap)
-
-**Option 3 — build from source (needs Go ≥ 1.24, once):**
+**From source (needs Go ≥ 1.24, once):**
 
 ```sh
-make install          # builds a static binary -> ~/.local/bin/lg
-# or pick a location:
+make install                 # builds a static binary -> ~/.local/bin/lg
 make install PREFIX=/usr/local
 ```
 
-After install, `lg` runs standalone — Go can be uninstalled and it still works.
+**Requirements**
 
-Runtime extras: `tmux` on Source; a FUSE implementation on Ghost (macFUSE on
-macOS, libfuse on Linux) for the actual mount.
+- On the **Source** server: just have `lg` on its `PATH`. `lg init` can deploy
+  the matching binary for you over SSH — no manual copy.
+- On your **laptop**: a FUSE implementation for the mount — [macFUSE] on macOS,
+  `libfuse` on Linux. (You only need this for `lg shell`; plain `lg <command>`
+  works without it.)
 
-## Build & test from source
+[macFUSE]: https://osxfuse.github.io
 
-```sh
-make build            # -> ./bin/lg
-make test             # pure logic + in-memory Ghost↔Source integration test
-make vet
-make release          # cross-compile static binaries for all platforms -> ./dist
-```
+---
 
 ## Quick start
 
-```sh
-# On Source (GPU server) — make `lg` available on PATH; the agent is launched
-# automatically by Ghost over ssh.
-
-# On Ghost (laptop):
-lg init          # interactive, step-by-step setup (just answer the prompts)
-lg shell         # mounts your repo, drops you into your shell with lg integration
-```
-
-`lg init` walks you through role, SSH host, remote repo path, and local mount
-point, with sensible defaults and a confirmation summary before it writes
-anything. To skip the prompts (e.g. in a script), pass them as flags instead:
+`lg` is project-local, like `git`: you set it up per repository.
 
 ```sh
-lg init --role ghost --host gpu-1 --remote-root /home/u/proj --local-root ~/proj
+mkdir ~/code/my-project && cd ~/code/my-project
+lg init                  # interactive: server host, remote repo path
 ```
 
-On a fresh machine, just typing `lg` greets you and points you to `lg init`.
+`lg init` walks you through everything with sensible defaults and a summary
+before it writes anything, then offers to deploy the agent to the server. The
+remote repo mounts as a subfolder right here, named after the repo — you don't
+pick a path. Prefer flags?
 
-Inside the shell:
-- `conda activate ml` / `source .venv/bin/activate` / `python train.py` →
-  auto-switch to SOURCE mode (remote tmux). Detach (Ctrl-b d) to return.
-- `cat`, `ls`, `grep` etc. stay LOCAL; the FUSE layer fetches file bytes on demand.
-- `lg status` — mode, file states, cache usage, journal backlog, conflicts.
-- `lg sessions` — remote tmux sessions lg created.
-- `lg local` — force back to LOCAL mode (escape hatch).
-- `lg config set source.host gpu-2` — change a setting (also `get`/`edit`/`show`).
+```sh
+lg init --role ghost --host gpu-1 --remote-root /home/you/my-project -y
+```
 
-## Architecture (maps to the spec)
+That's it. Now you can run remote commands from anywhere in the project:
 
-| Package | Role | Spec |
-|---|---|---|
-| `internal/config` | config.yaml, `.lgignore` matcher, `local↔remote` path mapper (the §7 shared helpers) | §8, §7 |
-| `internal/proto` | message schema + hand-rolled `uvarint length + bytes` framing | D3 |
-| `internal/transport` | native `x/crypto/ssh` + `yamux` streams, the single online flag, reconnect | D1, §6 |
-| `internal/agent` | Source daemon: file server, tmux manager, PTY bridge, watcher | §3.1, §4.3, §5.3 |
-| `internal/fuse` | ghost/cached/live state machine, journal-first write-through, LRU eviction, conflict backup, invalidation | §4 |
-| `internal/shell` | trigger engine, LOCAL/SOURCE state machine, router, PTY bridge, zsh/bash integration | §5, D2 |
-| `internal/cli` | `init`/`shell`/`serve`/`status`/`sessions`/`local`/`enter-source`/`hook` | — |
+```sh
+lg make            # build on the server
+lg pytest -q       # test on the server, watch it stream
+lg ls -la          # peek at the server's files
+```
 
-The three D1–D3 decisions and the §7 cross-cutting singletons are implemented
-exactly as the spec fixed them: one SSH connection multiplexed by yamux; a
-preexec-hook shell (zsh first, bash best-effort); hand-rolled length-prefixed
-framing; one path mapper, one ignore matcher, one online flag, one logger.
+For an editor-friendly view of the remote tree:
 
-## What is verified here vs. what needs hardware
+```sh
+lg shell           # mounts the server repo next to your project and opens a shell
+```
 
-`go test ./...` exercises, in memory, the parts that don't need a kernel mount
-or a second machine:
+The mount appears as a subfolder named after the server repo. Open it in
+your editor — the entire tree is browsable immediately, and files materialize as
+you open them. Edits you save flow back to the server automatically; changes made
+on the server show up in the mount. Type `exit` to unmount.
 
-- **Transport** — a real yamux Ghost↔Source over `net.Pipe`: framing, stream
-  multiplexing, control ping/pong, and the file RPCs against the agent's file
-  server (`internal/agent/integration_test.go`). This is the S1 spike as a test.
-- **FUSE Backend state machine** — driven by a fake Source: ghost→cached fetch,
-  journal-first write → flush → cached, conflict detection + `.lg-conflict`
-  backup, LRU eviction (and that dirty/live files are never evicted), lazy vs.
-  immediate invalidation, and offline accumulate → reconnect replay
-  (`internal/fuse/backend_test.go`).
-- **Trigger/router, ignore matcher, path mapper, framing** — unit tests.
+On a brand-new machine, just typing `lg` greets you and points you at `lg init`.
 
-The following compile and are wired end-to-end but require real hardware to run,
-so they are **not** integration-tested in this environment:
+---
 
-- The actual FUSE **mount** (`go-fuse`) — needs macFUSE/libfuse installed.
-- The **SSH dial** to a live Source and the `tmux` PTY **bridge** — need a real
-  server + tmux.
+## The two ideas, in a bit more depth
 
-## Known deviation from the spec
+### Running commands on the server
 
-**Two SSH connections while in SOURCE mode, not one.** `lg shell` holds the
-long-lived connection for the FUSE mount + journal flush; `lg enter-source`
-(a separate short-lived process spawned by the shell hook) dials its own
-connection for the PTY bridge. The spec's single-connection ideal would require
-a per-session daemon exposing a unix socket that both the mount and the hook
-processes share, relaying the PTY over it. That daemon+socket unification is the
-natural next step; the current split keeps the process model simple and avoids
-cross-process stream passing. The flush barrier on SOURCE entry (§5.3) works
-across the two processes by polling the on-disk journal.
+Any first word that isn't an `lg` subcommand is treated as a remote command:
 
-## SOURCE-mode exit
+```sh
+lg python train.py         # bare form — the common case
+lg run -- status           # explicit form, for names that clash with subcommands
+```
 
-Primary exit is detaching the remote tmux session (Ctrl-b d), which closes the
-bridge and returns to LOCAL. `lg local` force-resets the tab state. The
-config'd `exit_command_map` is wired into the trigger engine for completeness,
-but since SOURCE-mode keystrokes go straight to the remote tmux, lg does not see
-them — detach is the reliable boundary.
+The command runs in a PTY on the server, so interactive tools behave exactly as
+they would over `ssh`: live output, terminal resizing, and Ctrl-C delivered to
+the remote process. Its exit code becomes `lg`'s exit code, so `lg ... && ...`
+and scripts just work.
+
+**Go all-in with toggle mode.** Flip a switch and *every* command in that shell
+tab runs on the server until you flip it back — no `lg` prefix needed:
+
+```sh
+lg toggle          # prompt gains a  remote  tag; commands now run on Source
+python train.py    # runs remotely
+make               # runs remotely
+lg local           # back to running locally
+```
+
+Inside a mounted `lg shell`, common read commands (`ls`, `cat`, `grep`, `find`,
+`tail`, …) automatically run on the server when your working directory is inside
+the mount — and fall back to the local command if the server is unreachable, so
+browsing never stalls.
+
+### Browsing the whole tree
+
+`lg shell` syncs the server tree's *metadata* eagerly (like OneDrive/Dropbox
+placeholder files): the complete directory structure with real sizes and
+timestamps is there the instant the mount comes up, even for a huge repo. A
+file's contents are fetched on first open and cached locally; the on-disk cache
+is size-capped and evicts least-recently-used content, while the file listing
+stays complete. Writes are journaled and pushed back to the server with
+last-write-wins conflict handling (a diverging server file is backed up, never
+silently clobbered).
+
+Files and directories matched by your `ignore` patterns (or a `.lgignore` at the
+repo root) are skipped on both sides — keep `.venv`, `node_modules`, and friends
+out to make the initial sync fast.
+
+---
+
+## Long-running jobs
+
+For training runs that should outlive your terminal (and your laptop going to
+sleep), detach them:
+
+```sh
+lg run -d -- python train.py --epochs 300     # prints a job id and returns
+lg jobs                                        # list jobs: id, state, age, command
+lg logs -f <id>                                # follow output live (Ctrl-C stops
+                                               # following, NOT the job)
+lg jobs kill <id>                              # stop a running job
+lg jobs rm <id>                                # forget a finished job + its logs
+```
+
+Detached jobs keep running on the server after `lg` exits and after you
+disconnect. Where the server supports it they run under `systemd --user` so a
+closed SSH session can't reap them; `lg` tells you if durability is reduced on a
+given host.
+
+---
+
+## Everyday commands
+
+| Command | What it does |
+|---|---|
+| `lg <command>` | Run `<command>` on the server, streaming live |
+| `lg run -- <command>` | Explicit run (use when a name clashes with a subcommand) |
+| `lg run -d -- <command>` | Launch a detached job that outlives this shell |
+| `lg jobs` / `lg logs [-f] <id>` | List detached jobs / show or follow their output |
+| `lg shell` | Mount the remote tree and open a shell with `lg` integration |
+| `lg toggle` / `lg local` | Send every command to the server / turn that off |
+| `lg status` | Connection, toggle state, sync freshness, cache, pending writes |
+| `lg config get\|set\|edit\|show` | Inspect or change settings safely |
+| `lg unmount` | Clear a leftover/stale mount |
+
+---
+
+## Configuration
+
+Everything for a project lives in a `.lg/` directory at its root — config, cache,
+tree snapshot, journal, and logs — discovered by walking up from your working
+directory, exactly like `.git/`. There's no global state.
+
+Connecting to the server uses your existing SSH setup:
+
+- **`system` mode (default)** shells out to the real `ssh` binary, so your
+  `~/.ssh/config` fully applies — `Host` aliases, `ProxyJump`/bastions,
+  `ControlMaster` (2FA/Duo isn't re-prompted), `IdentityFile`, `known_hosts`.
+  This is what makes lab and 2FA servers just work.
+- **`native` mode** uses a built-in SSH client. Password auth (stored encrypted,
+  keyed to the machine) is also supported for hosts that need it.
+
+Change a setting with `lg config set source.host gpu-2`, or edit the file with
+`lg config edit` (it's validated before saving).
+
+---
+
+## Build & test from source
+
+Go is only needed to build; the resulting binary runs standalone.
+
+```sh
+make build     # -> ./bin/lg
+make test      # unit tests + an in-memory Ghost↔Source integration test
+make vet
+make release   # cross-compiled static binaries for all platforms -> ./dist
+make install   # build + install to ~/.local/bin/lg
+```
+
+The test suite runs a real multiplexed Ghost↔Source session over an in-memory
+pipe — command execution, the full-tree and file RPCs, framing, and the FUSE
+backend logic against a fake Source — so most behavior is verified without a
+kernel mount or a second machine. The live FUSE mount and the SSH dial to a real
+server naturally require actual hardware.
+
+---
+
+## How it works
+
+One SSH connection to the server carries several logical streams multiplexed with
+[yamux]: a control channel, file RPCs, change notifications, and a PTY per remote
+command. The server side is a small agent (`lg serve`) launched over SSH on
+demand — no long-running daemon or extra open port. On the laptop, a FUSE
+filesystem serves the eagerly-synced metadata index and fetches content lazily,
+while a journal handles write-through back to the server.
+
+```
+internal/config     config, .lgignore matcher, local↔remote path mapper
+internal/proto      message schema + length-prefixed framing
+internal/transport  SSH dial (system or native) + yamux streams + reconnect
+internal/agent      Source agent: file server, full-tree walk, PTY exec, jobs, watcher
+internal/fuse       Ghost FUSE: metadata index, lazy content, write-through journal
+internal/shell      command runner (PTY bridge), jobs client, toggle, shell hooks
+internal/cli        the cobra command surface
+internal/shellq     the single shell-quoting helper used everywhere
+```
+
+[yamux]: https://github.com/hashicorp/yamux

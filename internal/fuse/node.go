@@ -8,7 +8,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/taehyun/lg/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/config"
 )
 
 // lgNode is one inode in the virtual tree. It translates syscalls into Backend
@@ -275,7 +275,7 @@ func retargetNode(inode *fs.Inode, newRel string) {
 }
 
 // lgHandle is an open file. Reads/writes hit the local cache file directly;
-// on release of a dirty handle the write is journaled (§4.2).
+// on release of a dirty handle the write is journaled.
 type lgHandle struct {
 	f        *os.File
 	b        *Backend
@@ -323,7 +323,7 @@ func (h *lgHandle) Release(ctx context.Context) syscall.Errno {
 	return errno
 }
 
-// journalIfDirty records the write-through on close/flush (§4.2).
+// journalIfDirty records the write-through on close/flush.
 func (h *lgHandle) journalIfDirty() syscall.Errno {
 	h.mu.Lock()
 	dirty := h.dirty

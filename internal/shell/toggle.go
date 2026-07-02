@@ -4,10 +4,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/taehyun/lg/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/config"
 )
 
-// Toggle mode (§1.2): when on, every command typed in the shell is sent to
+// Toggle mode: when on, every command typed in the shell is sent to
 // Source. State is a per-tab marker file so the long-lived `lg shell` and the
 // short-lived per-command hook invocations agree without IPC. The marker's mere
 // existence means "on" — no contents to parse.

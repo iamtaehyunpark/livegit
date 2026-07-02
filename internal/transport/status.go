@@ -6,11 +6,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/taehyun/lg/internal/logx"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
-// Status is the single online/offline source of truth (spec §6.2, §7). The
+// Status is the single online/offline source of truth. The
 // transport owns it; FUSE write-through, the shell's SOURCE entry, and the
 // journal flush worker all read it (via Online) and may subscribe for edge
 // notifications (via Subscribe) rather than each polling independently.

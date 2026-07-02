@@ -1,7 +1,7 @@
-// Package transport implements D1: a single SSH connection carrying several
+// Package transport multiplexes a single SSH connection into several
 // logical yamux streams (PTY / file-RPC / notify). It also owns the single
 // online/offline flag that FUSE write-through, the shell's SOURCE entry, and
-// the journal flush worker all subscribe to (spec §6.2, §7).
+// the journal flush worker all subscribe to.
 //
 // The SSH connection is established by exec'ing `lg serve` on Source through its
 // existing sshd, then running yamux over that session's stdio. This reuses the
@@ -25,6 +25,7 @@ const (
 	StreamNotify  StreamKind = 3 // invalidation push (Source initiates)
 	StreamPTY     StreamKind = 4 // raw PTY bytes for one remote command
 	StreamPTYCtl  StreamKind = 5 // exec control (ExecReq/Resize/ExecExit) for that command
+	StreamJobLog  StreamKind = 6 // tail a detached job's log file (Ghost initiates)
 )
 
 func (k StreamKind) String() string {
@@ -39,6 +40,8 @@ func (k StreamKind) String() string {
 		return "pty"
 	case StreamPTYCtl:
 		return "pty-ctl"
+	case StreamJobLog:
+		return "job-log"
 	default:
 		return fmt.Sprintf("kind(%d)", byte(k))
 	}

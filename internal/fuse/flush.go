@@ -5,12 +5,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // RunFlush is the background worker that drains the journal to Source. It is the
-// single write path for both online and offline (§4.2/§4.5): online it flushes
+// single write path for both online and offline: online it flushes
 // within ms; offline it parks until the journal is woken on reconnect.
 func (b *Backend) RunFlush(ctx context.Context) {
 	for {
@@ -85,7 +85,7 @@ func (b *Backend) flushEntry(ctx context.Context, e JournalEntry) error {
 }
 
 // FlushBarrier blocks until no pending journal entries remain for relDir, or the
-// timeout elapses. This is the SOURCE-mode-entry barrier (§4.2 mitigation, §5.3):
+// timeout elapses. This is the SOURCE-mode-entry barrier:
 // before running commands on Source, guarantee Source has the latest edits.
 func (b *Backend) FlushBarrier(ctx context.Context, relDir string, timeout time.Duration) error {
 	relDir = config.Rel(relDir)

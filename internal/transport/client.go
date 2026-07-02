@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/logx"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // ErrOffline is returned by RPC helpers when the link is down.
@@ -53,7 +53,7 @@ func NewClient(cfg *config.Config, remoteBin string) *Client {
 // Status returns the shared online flag.
 func (c *Client) Status() *Status { return c.status }
 
-// OnInvalidate registers the handler for Source->Ghost change pushes (§4.3).
+// OnInvalidate registers the handler for Source->Ghost change pushes.
 func (c *Client) OnInvalidate(fn func(proto.Invalidate)) { c.invalidate = fn }
 
 // Start launches the reconnect supervisor in the background.
@@ -224,6 +224,19 @@ func (c *Client) OpenPTYStreams() (ctl, data *yamux.Stream, err error) {
 		return nil, nil, err
 	}
 	return ctl, data, nil
+}
+
+// OpenJobLogStream opens a stream to tail a detached job's log file. The caller
+// writes a JSON proto.JobLogReq line first (mirroring the exec token line).
+func (c *Client) OpenJobLogStream() (*yamux.Stream, error) {
+	c.mu.RLock()
+	sess := c.sess
+	online := c.status.Online()
+	c.mu.RUnlock()
+	if sess == nil || !online {
+		return nil, ErrOffline
+	}
+	return OpenStream(sess, StreamJobLog)
 }
 
 // Close tears the client down.

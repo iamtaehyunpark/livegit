@@ -18,7 +18,7 @@ import (
 // Password auth for a Source is stored encrypted at rest (never plaintext, never
 // in config.yaml). The key is derived from a machine identifier, so copying the
 // credentials file to another machine yields an undecryptable blob. This is the
-// "good enough" personal-tool bar from the design (§3.2), not a hardened secret
+// "good enough" personal-tool bar from the design, not a hardened secret
 // store.
 
 // appSalt separates lg's derived key from any other use of the machine id.

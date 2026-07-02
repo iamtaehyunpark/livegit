@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/hashx"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/hashx"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // fakeSource is an in-memory Source implementing SourceRPC. Writes are last-

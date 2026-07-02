@@ -6,36 +6,48 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/fuse"
+	"github.com/iamtaehyunpark/livegit/internal/shell"
+	"github.com/iamtaehyunpark/livegit/internal/shellq"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/fuse"
-	"github.com/taehyun/lg/internal/shell"
-	"github.com/taehyun/lg/internal/transport"
 )
 
 // newRunCmd is the explicit form of the command runner: `lg run -- <command>`.
 // The bare form `lg <command>` (see dispatchPassthrough) routes here too. It
 // runs the command on Source in a PTY, streams it live, and exits with the
-// remote process's exit code (§1.1).
+// remote process's exit code.
 func newRunCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:                "run -- <command>",
 		Short:              "Run a command on Source, streaming output live",
 		DisableFlagParsing: true, // pass every token through to the remote command
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// --local-fallback arrives as a literal arg (flag parsing is off); the
-			// shell integration uses it for auto-routed read commands so they run
-			// the local command when Source is unreachable.
-			localFallback := false
-			if len(args) > 0 && args[0] == "--local-fallback" {
-				localFallback = true
-				args = args[1:]
+			// Leading flags arrive as literal args (flag parsing is off):
+			//   --local-fallback : shell integration uses it for auto-routed read
+			//                      commands so they run locally when Source is down.
+			//   --detach / -d    : launch the command as a detached job that
+			//                      outlives this invocation, print its id, return.
+			localFallback, detach := false, false
+		flags:
+			for len(args) > 0 {
+				switch args[0] {
+				case "--local-fallback":
+					localFallback = true
+					args = args[1:]
+				case "--detach", "-d":
+					detach = true
+					args = args[1:]
+				default:
+					break flags
+				}
 			}
 			args = stripDashes(args)
 			if len(args) == 0 {
-				return fmt.Errorf("usage: lg run -- <command>")
+				return fmt.Errorf("usage: lg run [--detach] -- <command>")
 			}
-			code := runRemote(args, localFallback)
+			code := runRemote(args, localFallback, detach)
 			os.Exit(code)
 			return nil
 		},
@@ -47,7 +59,7 @@ func newRunCmd() *cobra.Command {
 // remote exit code. It is the shared entrypoint for `lg run` and `lg <command>`.
 // If localFallback is set and Source can't be reached, it runs the command in
 // the local shell instead of failing (used by auto-routed read commands).
-func runRemote(args []string, localFallback bool) int {
+func runRemote(args []string, localFallback, detach bool) int {
 	cfg, err := loadGhost()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lg: %v\n", err)
@@ -79,7 +91,11 @@ func runRemote(args []string, localFallback bool) int {
 		fmt.Fprintf(os.Stderr, "lg: flush barrier: %v (continuing)\n", err)
 	}
 
-	code, err := shell.RunRemote(client, joinArgs(args), relDir)
+	if detach {
+		return startDetached(client, shellq.Join(args), relDir)
+	}
+
+	code, err := shell.RunRemote(client, shellq.Join(args), relDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lg: %v\n", err)
 		if code == 0 {
@@ -87,6 +103,24 @@ func runRemote(args []string, localFallback bool) int {
 		}
 	}
 	return code
+}
+
+// startDetached launches cmd as a background job on Source and prints how to
+// follow it. The job outlives this command (and the ghost): it runs under
+// systemd --user, escaping the ssh session scope that would otherwise reap it.
+func startDetached(client *transport.Client, cmd, relDir string) int {
+	resp, err := shell.StartJob(client, cmd, relDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lg: %v\n", err)
+		return 1
+	}
+	if resp.Warn != "" {
+		fmt.Fprintf(os.Stderr, "lg: %s\n", resp.Warn)
+	}
+	fmt.Printf("started job %s (%s)\n", resp.ID, resp.Mode)
+	fmt.Printf("  follow:  lg logs -f %s\n", resp.ID)
+	fmt.Printf("  list:    lg jobs\n")
+	return 0
 }
 
 // runLocal runs the already-tokenized command in the local shell (the fallback
@@ -103,42 +137,6 @@ func runLocal(args []string) int {
 		return 127
 	}
 	return 0
-}
-
-// joinArgs reconstructs a shell command line from argv, quoting tokens that
-// contain whitespace so `lg run -- echo "a b"` survives the round-trip.
-func joinArgs(args []string) string {
-	out := ""
-	for i, a := range args {
-		if i > 0 {
-			out += " "
-		}
-		out += quoteArg(a)
-	}
-	return out
-}
-
-func quoteArg(a string) string {
-	needs := a == ""
-	for _, r := range a {
-		if r == ' ' || r == '\t' || r == '\n' {
-			needs = true
-			break
-		}
-	}
-	if !needs {
-		return a
-	}
-	// Single-quote and escape embedded single quotes.
-	out := "'"
-	for _, r := range a {
-		if r == '\'' {
-			out += `'\''`
-		} else {
-			out += string(r)
-		}
-	}
-	return out + "'"
 }
 
 // stripDashes drops a leading "--" that cobra leaves in args under

@@ -8,7 +8,7 @@ PKG         := ./cmd/lg
 PREFIX      ?= $(HOME)/.local
 BINDIR      := $(PREFIX)/bin
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS     := -s -w -X github.com/taehyun/lg/internal/cli.Version=$(VERSION)
+LDFLAGS     := -s -w -X github.com/iamtaehyunpark/livegit/internal/cli.Version=$(VERSION)
 
 # CGO_ENABLED=0 => fully static, no libc dependency, maximally portable.
 GOBUILD     := CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)"

@@ -7,13 +7,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/taehyun/lg/internal/cli"
+	"github.com/iamtaehyunpark/livegit/internal/cli"
 )
 
 func main() {
 	root := cli.NewRoot()
 
-	// Bare-command passthrough (§1.1): `lg <anything not a subcommand>` runs that
+	// Bare-command passthrough: `lg <anything not a subcommand>` runs that
 	// command on Source. Only intercept when the first arg is a plain word — not a
 	// flag (-h/--help/--version) and not a known subcommand — so the normal CLI
 	// surface keeps working.

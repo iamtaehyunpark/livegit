@@ -1,4 +1,4 @@
-// Package logx is the single leveled logger shared by every lg package (§7).
+// Package logx is the single leveled logger shared by every lg package.
 // Debugging a multiplexed SSH + FUSE + PTY system without consistent logging is
 // brutal, so all components funnel through here from M0 onward.
 package logx

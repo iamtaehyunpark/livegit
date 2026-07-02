@@ -1,4 +1,4 @@
-module github.com/taehyun/lg
+module github.com/iamtaehyunpark/livegit
 
 go 1.26.4
 

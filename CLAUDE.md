@@ -52,11 +52,14 @@ cmd/lg/main.go            entrypoint; bare-command passthrough (lg <cmd> -> remo
 internal/config           config.yaml, .lgignore matcher, local<->remote path mapper (shared)
 internal/proto            message schema + length-prefixed framing (exec, tree, file RPC, invalidate)
 internal/transport        ssh dial (system OR native) + yamux streams + single online flag + reconnect
-internal/agent            Source daemon (lg serve): file server, full-tree walk, exec hub (PTY), watcher
+internal/agent            Source daemon (lg serve): file server, full-tree walk, exec hub (PTY),
+                          job manager (jobs.go: detached systemd-run --user jobs), watcher
 internal/fuse             Ghost FUSE: full-tree metadata Index (+ snapshot), lazy content fetch,
                           journal write-through (last-write-wins), size-capped cache, mount lifecycle
-internal/shell            command runner (run.go: RunRemote PTY bridge), toggle state, zsh/bash hooks
-internal/cli              cobra commands (init/config/shell/run/toggle/local/serve/status/unmount/hook)
+internal/shell            command runner (run.go: RunRemote PTY bridge), jobs.go (detach/list/logs
+                          ghost client), toggle state, zsh/bash hooks
+internal/cli              cobra commands (init/config/shell/run/jobs/logs/toggle/local/serve/status/
+                          unmount/hook)
 ```
 
 The FUSE backend's pure logic is in `internal/fuse/backend.go` + `index.go`,
@@ -70,6 +73,15 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   passthrough: any first word that isn't a subcommand/flag routes to `lg run`.
 - `lg run -- <command>` — explicit form (use when a command name collides with a
   subcommand, e.g. `lg run -- status`).
+- `lg run --detach -- <command>` (`-d`) — launch a **detached job** that outlives
+  this invocation (and the ghost disconnecting). Prints a job id and returns.
+  Runs on Source under `systemd-run --user` so it escapes the ssh session cgroup
+  scope that would otherwise reap it (see "Detached jobs" below). For multi-hour
+  GPU runs.
+- `lg jobs` — list detached jobs (id, state, mode, age, command). Subcommands:
+  `lg jobs kill <id>` (stop it), `lg jobs rm <id>` (forget a finished job + logs).
+- `lg logs <id>` (`-f` to follow) — show/tail a detached job's output. Following
+  ends when the job finishes; Ctrl-C stops following **without** killing the job.
 - `lg toggle` — flip toggle mode for the current shell tab (every command → Source).
   `lg local` is the explicit "toggle off".
 - **Auto-remote commands**: in `lg shell`, a configurable list (`auto_remote_commands`,
@@ -86,6 +98,42 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
 - `lg unmount` — clear a leftover/stale FUSE mount.
 - `lg status` — connection, toggle on/off, tree-sync freshness, cache, pending writes.
 - `lg serve --remote-root <p> [--ignore <csv>]` — Source agent (hidden; launched over ssh).
+
+## Detached jobs (fire-and-forget remote runs)
+
+`lg run` opens a **fresh ssh session + fresh `lg serve` per command** and kills
+it on return (`cli/run.go`: `defer client.Close()`). That ends the remote ssh
+login session, and systemd tears down the session's cgroup scope
+(`KillUserProcesses=yes`, the lab default) — killing *everything* spawned in it:
+`nohup`, `setsid`, even a detached `tmux` server. So a plain backgrounded job
+cannot be left behind through `lg run`.
+
+**lg is NOT the reaper** — don't go looking for a process-group kill to soften.
+`internal/agent/exec.go` only does `cmd.Wait()` + `ptmx.Close()`. The reaper is
+systemd tearing down the ephemeral ssh session scope. Evidence it's cgroup
+teardown and not a signal: `nohup` (ignores SIGHUP) and `setsid` (leaves the tty)
+both die anyway, while `systemd-run --user` (a different cgroup branch,
+`user@UID.service`) survives.
+
+So detached jobs launch via **`systemd-run --user`** to escape the session
+scope. Design (`internal/agent/jobs.go`):
+- **systemd is the source of truth for liveness; an on-disk `~/.lg/jobs/<id>/`
+  dir on Source is the source of truth for identity/logs.** State is NOT held in
+  the agent — each `lg run --detach` spawns a short-lived agent that launches the
+  job and dies; `lg jobs`/`lg logs` run in *later* agents that reconstruct
+  everything from systemd + the jobs dir. No cross-agent shared memory.
+- Each job dir holds `meta.json` (id/cmd/mode/unit-or-pid/started), `run.sh` (a
+  wrapper: `sh -lc <cmd>` for PATH/conda parity, capturing `$?` to an `exit`
+  file), and `log` (combined output). State = done(code) if the `exit` file
+  exists, else running if systemd/pid is alive, else dead.
+- Fallback where systemd --user is unavailable: `setsid`+nohup (best effort — it
+  still lives in the session scope, so it needs `loginctl enable-linger` to be
+  durable; this is reported to the user as a warning). The agent sets
+  `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` to `/run/user/<uid>` when missing
+  so `systemctl --user` is reachable from a non-interactive ssh exec.
+- Wire protocol: `TypeJobStart/List/Act` RPCs on the **control stream** (like
+  ping); log tailing on a dedicated `StreamJobLog` stream (like the PTY data
+  stream — first line is a JSON `JobLogReq`).
 
 ## Two transports (D1 revisited)
 

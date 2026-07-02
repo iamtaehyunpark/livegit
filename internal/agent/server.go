@@ -5,20 +5,21 @@ import (
 	"path/filepath"
 
 	"github.com/hashicorp/yamux"
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/logx"
-	"github.com/taehyun/lg/internal/proto"
-	"github.com/taehyun/lg/internal/transport"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 )
 
 // Server is the Source-side daemon (`lg serve`). It runs over the stdio pipe of
 // the ssh exec session: a yamux server multiplexing file-RPC, control, notify,
-// and PTY streams (§3.1, D1).
+// and PTY streams.
 type Server struct {
 	remoteRoot string
 	matcher    *config.Matcher
 	file       *FileServer
 	exec       *execHub
+	jobs       *jobManager
 }
 
 // NewServer builds the Source daemon for a given remote root. ignore carries the
@@ -36,6 +37,7 @@ func NewServer(remoteRoot string, ignore []string) (*Server, error) {
 		matcher:    matcher,
 		file:       NewFileServer(remoteRoot, matcher),
 		exec:       newExecHub(remoteRoot),
+		jobs:       newJobManager(defaultJobsDir(), remoteRoot),
 	}, nil
 }
 
@@ -90,19 +92,43 @@ func (s *Server) dispatch(stream *yamux.Stream, kind transport.StreamKind) {
 		go s.exec.serveControl(stream)
 	case transport.StreamPTY:
 		go s.exec.serveData(stream)
+	case transport.StreamJobLog:
+		go s.jobs.serveLog(stream)
 	default:
 		logx.For("agent").Warn("unknown stream kind", "kind", kind)
 		_ = stream.Close()
 	}
 }
 
-// handleControl answers health pings.
+// handleControl answers health pings and the detached-job RPCs (start/list/act).
 func (s *Server) handleControl(f proto.Frame) (proto.MsgType, any, bool, error) {
 	switch f.Type {
 	case proto.TypePing:
 		var p proto.Ping
 		_ = proto.Unmarshal(f.Body, &p)
 		return proto.TypePong, proto.Pong{Nonce: p.Nonce}, true, nil
+
+	case proto.TypeJobStartReq:
+		var req proto.JobStartReq
+		_ = proto.Unmarshal(f.Body, &req)
+		info, warn, err := s.jobs.start(req.Cmd, req.Cwd)
+		if err != nil {
+			return 0, nil, true, err
+		}
+		return proto.TypeJobStartResp, proto.JobStartResp{ID: info.ID, Mode: info.Mode, Warn: warn}, true, nil
+
+	case proto.TypeJobListReq:
+		return proto.TypeJobListResp, proto.JobListResp{Jobs: s.jobs.list()}, true, nil
+
+	case proto.TypeJobActReq:
+		var req proto.JobActReq
+		_ = proto.Unmarshal(f.Body, &req)
+		msg, err := s.jobs.act(req.ID, req.Action)
+		if err != nil {
+			return 0, nil, true, err
+		}
+		return proto.TypeJobActResp, proto.JobActResp{OK: true, Message: msg}, true, nil
+
 	default:
 		return 0, nil, false, nil
 	}

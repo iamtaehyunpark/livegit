@@ -5,7 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/taehyun/lg/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/shellq"
 )
 
 // hooksDir holds the generated shell-integration scripts.
@@ -14,10 +15,11 @@ func hooksDir() string { return filepath.Join(config.Dir(), "hooks") }
 // zshIntegration is sourced into the user's real zsh by `lg shell`. It runs the
 // user's zsh unchanged and adds two things, both keyed on the first word of the
 // command line:
-//   - toggle mode (§1.2): when on, EVERY command is rewritten to `lg run`.
+//   - toggle mode: when on, EVERY command is rewritten to `lg run`.
 //   - auto-remote commands: a fixed list (ls/cat/tree/…) that always run on
 //     Source even with toggle off, falling back to the local command if Source
 //     is unreachable (`lg run --local-fallback`).
+//
 // There is no auto-detection beyond this explicit first-word list.
 func zshIntegration(autoCmds []string) string {
 	return `# lg (Live Git) zsh integration — auto-generated, do not edit.
@@ -104,7 +106,7 @@ esac
 func zshList(cmds []string) string {
 	out := make([]string, len(cmds))
 	for i, c := range cmds {
-		out[i] = "'" + strings.ReplaceAll(c, "'", `'\''`) + "'"
+		out[i] = shellq.Quote(c)
 	}
 	return strings.Join(out, " ")
 }

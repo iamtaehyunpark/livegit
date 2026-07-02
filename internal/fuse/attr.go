@@ -5,8 +5,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // Attr is the attribute view the FUSE node layer needs for one path.
@@ -19,7 +19,7 @@ type Attr struct {
 }
 
 // Getattr resolves attributes for rel entirely from the full-tree index, so a
-// file shows its real size before its bytes are ever fetched (§2.1). If the
+// file shows its real size before its bytes are ever fetched. If the
 // local cache holds newer bytes (an unflushed edit), those win for size/mtime.
 // A path missing from the index falls back to a Source stat when online (covers
 // the brief window before the first tree sync completes).
@@ -56,7 +56,7 @@ func (b *Backend) Getattr(ctx context.Context, rel string) (Attr, error) {
 }
 
 // Readdir lists a directory from the full-tree index — the complete listing is
-// always available locally, online or offline (§2.1/§2.3), no per-ls round-trip.
+// always available locally, online or offline, no per-ls round-trip.
 func (b *Backend) Readdir(ctx context.Context, rel string) ([]proto.DirEntry, error) {
 	return b.index.Children(rel), nil
 }

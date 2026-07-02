@@ -4,8 +4,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/iamtaehyunpark/livegit/internal/agent"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/agent"
 )
 
 // newServeCmd is the Source-side daemon, invoked by Ghost over ssh as

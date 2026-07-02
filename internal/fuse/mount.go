@@ -8,7 +8,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/taehyun/lg/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
 )
 
 // Mount mounts the virtual filesystem at mountpoint and starts the Backend's

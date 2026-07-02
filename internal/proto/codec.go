@@ -8,7 +8,7 @@ import (
 	"io"
 )
 
-// Wire format (D3 — hand-rolled length-prefixed framing):
+// Wire format (hand-rolled length-prefixed framing):
 //
 //	uvarint  payloadLen
 //	byte     type

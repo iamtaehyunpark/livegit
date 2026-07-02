@@ -3,8 +3,8 @@ package fuse
 import (
 	"os"
 
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // Invalidate handles a Source->Ghost change push: it keeps the full-tree index

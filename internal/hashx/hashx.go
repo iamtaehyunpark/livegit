@@ -1,6 +1,6 @@
 // Package hashx provides the one content-hash function used on both sides so
 // Ghost and Source always compute the same identity for a file's bytes
-// (used for conflict detection in §4.4 and sync-point tracking in §4.1).
+// (used for conflict detection and sync-point tracking).
 package hashx
 
 import (

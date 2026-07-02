@@ -12,14 +12,14 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // Entry is one node in the full-tree metadata index. Every file and directory
 // on Source has an Entry the moment the tree is synced — so the whole mount is
 // browsable immediately (names, real sizes, types), online or offline, before
-// any content is fetched (Pivot Directive §2).
+// any content is fetched.
 type Entry struct {
 	Rel         string `json:"rel"`
 	IsDir       bool   `json:"dir,omitempty"`

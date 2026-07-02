@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/taehyun/lg/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/shellq"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -178,16 +179,11 @@ func dialSystemSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 // user's profile (MOTD, 2FA automation) and corrupt the binary yamux stream.
 func remoteAgentCmd(remoteBin string, cfg *config.Config) string {
 	cmd := fmt.Sprintf(`PATH="$HOME/.local/bin:$PATH" %s serve --remote-root %s`,
-		remoteBin, shellQuote(cfg.Source.RemoteRoot))
+		remoteBin, shellq.Quote(cfg.Source.RemoteRoot))
 	if ig := strings.Join(cfg.Ignore, ","); ig != "" {
-		cmd += " --ignore " + shellQuote(ig)
+		cmd += " --ignore " + shellq.Quote(ig)
 	}
 	return cmd
-}
-
-// shellQuote single-quotes a string for safe embedding in the remote ssh command.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func authMethods(cfg *config.Config) ([]ssh.AuthMethod, error) {

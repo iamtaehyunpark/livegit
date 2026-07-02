@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Matcher is the single .lgignore / ignore-pattern implementation (spec §4.6, §7).
+// Matcher is the single .lgignore / ignore-pattern implementation.
 // It is shared by the FUSE layer (to skip ghost-mapping) and the Source watcher
 // (to skip invalidation pushes), so both sides agree on exactly what is excluded.
 //

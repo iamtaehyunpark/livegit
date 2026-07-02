@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/iamtaehyunpark/livegit/internal/shell"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/shell"
 )
 
-// newToggleCmd flips toggle mode for the current shell tab (§1.2). When on,
+// newToggleCmd flips toggle mode for the current shell tab. When on,
 // every command typed in this shell is sent to Source; when off, it's a normal
 // local shell. `lg local` is an explicit alias for "turn toggle off".
 func newToggleCmd() *cobra.Command {

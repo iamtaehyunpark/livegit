@@ -1,5 +1,5 @@
 // Package config owns config.yaml parsing plus the three cross-cutting helpers
-// flagged in spec §7 that must have a single implementation: path mapping
+// that must have a single implementation: path mapping
 // (paths.go), the ignore matcher (ignore.go), and the config schema below.
 package config
 
@@ -20,12 +20,12 @@ const (
 	RoleSource Role = "source"
 )
 
-// Config is the parsed ~/.lg/config.yaml (spec §8).
+// Config is the parsed ~/.lg/config.yaml.
 type Config struct {
 	Role Role `yaml:"role"`
 
 	Source struct {
-		Host       string `yaml:"host"`        // ssh target (D1: native ssh, host kept directly)
+		Host       string `yaml:"host"`        // ssh target (native ssh; host kept as-is)
 		RemoteRoot string `yaml:"remote_root"` // absolute path of the repo on Source
 		User       string `yaml:"user"`        // optional; defaults to $USER
 		Port       int    `yaml:"port"`        // optional; defaults to 22

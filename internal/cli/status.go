@@ -2,12 +2,13 @@ package cli
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/shell"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/shell"
 )
 
 func newStatusCmd() *cobra.Command {
@@ -64,25 +65,14 @@ func countSnapshotEntries() int {
 	if err != nil {
 		return 0
 	}
-	// Entries are a JSON array; count is cheap enough via the decoder.
-	n := 0
-	depth := 0
-	for _, r := range b {
-		switch r {
-		case '{':
-			if depth == 1 {
-				n++
-			}
-			depth++
-		case '[':
-			depth++
-		case '}':
-			depth--
-		case ']':
-			depth--
-		}
+	// tree.json is a JSON array of entries; count elements without decoding each
+	// one (RawMessage skips per-field work and is correct for any file name — a
+	// hand-rolled brace counter miscounts names containing '{'/'}').
+	var list []json.RawMessage
+	if json.Unmarshal(b, &list) != nil {
+		return 0
 	}
-	return n
+	return len(list)
 }
 
 func cacheBytes() int64 {

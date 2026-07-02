@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/taehyun/lg/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/config"
 )
 
 // Barrier sentinel errors.
@@ -20,15 +20,15 @@ var (
 
 // cachedFile is one materialized content file on local disk.
 type cachedFile struct {
-	rel    string
-	size   int64
-	atime  time.Time
+	rel   string
+	size  int64
+	atime time.Time
 }
 
 // RunEviction periodically keeps the on-disk content cache under the configured
 // size cap. Unlike the old model, eviction only removes *content* bytes — the
 // full-tree metadata index always stays complete, so an evicted file is still
-// listed with its real size and simply refetches on next open (§2.2).
+// listed with its real size and simply refetches on next open.
 func (b *Backend) RunEviction(ctx context.Context) {
 	for {
 		select {

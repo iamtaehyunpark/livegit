@@ -10,15 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/taehyun/lg/internal/logx"
-	"github.com/taehyun/lg/internal/proto"
-	"github.com/taehyun/lg/internal/transport"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 	"golang.org/x/term"
 )
 
 // RunRemote runs one command on Source inside a real PTY and streams it to the
-// local terminal, returning the remote process's exit code (the Pivot
-// Directive's command runner, §1).
+// local terminal, returning the remote process's exit code (the command runner).
 //
 // It mirrors `ssh host <cmd>`: the local terminal is put in raw mode so every
 // keystroke — including Ctrl-C/Ctrl-Z — rides in-band to the remote PTY's line

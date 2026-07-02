@@ -16,21 +16,21 @@ const (
 	OpCreate JournalOp = "create"
 )
 
-// JournalEntry is one record (§4.5). Content is not stored inline: it is read
+// JournalEntry is one record. Content is not stored inline: it is read
 // from the live cache file at flush time, which naturally coalesces repeated
 // edits to the same path into the latest bytes.
 type JournalEntry struct {
 	Seq      uint64    `json:"seq"`
 	Rel      string    `json:"rel"`
 	Op       JournalOp `json:"op"`
-	BaseHash string    `json:"base_hash"` // sync-point hash, for conflict detection (§4.4)
+	BaseHash string    `json:"base_hash"` // sync-point hash, for conflict detection
 	ModTime  int64     `json:"mod_time"`
 	Mode     uint32    `json:"mode"`
 	Ts       int64     `json:"ts"`
 }
 
 // Journal is the append-only write log. It is the single path for all writes —
-// online or offline (§4.2). Online, the flush worker drains it within ms;
+// online or offline. Online, the flush worker drains it within ms;
 // offline, entries accumulate until reconnect. Durable across restarts.
 type Journal struct {
 	path string
@@ -143,7 +143,7 @@ func (j *Journal) Ack(seq uint64) error {
 }
 
 // PendingForDir reports whether any pending entry is at/under the rel dir.
-// Used by the SOURCE-entry flush barrier (§4.2 mitigation, §5.3).
+// Used by the SOURCE-entry flush barrier.
 func (j *Journal) PendingForDir(relDir string) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -163,7 +163,7 @@ func (j *Journal) PendingCount() int {
 }
 
 // HasPending reports whether a specific path has unflushed entries (eviction
-// guard — §4.2 forbids evicting a path with pending journal entries).
+// guard — lg must not evict a path with pending journal entries).
 func (j *Journal) HasPending(rel string) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()

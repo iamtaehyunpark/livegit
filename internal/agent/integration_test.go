@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"net"
 	"os"
@@ -12,8 +13,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/yamux"
-	"github.com/taehyun/lg/internal/proto"
-	"github.com/taehyun/lg/internal/transport"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 )
 
 // TestEndToEndOverPipe wires a real yamux Ghost<->Source over net.Pipe and
@@ -29,6 +30,10 @@ func TestEndToEndOverPipe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Keep detached-job state in a temp dir (not ~/.lg) and use the nohup path so
+	// the test doesn't create real systemd units on a systemd host.
+	srv.jobs = newJobManager(t.TempDir(), root)
+	srv.jobs.forceNohup = true
 	go srv.Serve(sourceConn)
 
 	sess, err := transport.NewClientSession(ghostConn)
@@ -148,6 +153,52 @@ func TestEndToEndOverPipe(t *testing.T) {
 	out, exitCode = runExecOverPipe(t, sess, ctx, "pwd", "sub")
 	if exitCode != 0 || !strings.Contains(out, "/sub") {
 		t.Fatalf("exec with cwd=sub: code=%d out=%q (want a path ending in /sub)", exitCode, out)
+	}
+
+	// Detached jobs: start one over the control stream, wait for it to finish via
+	// JobList, then tail its captured output over a StreamJobLog stream.
+	jctx, jcancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer jcancel()
+
+	startF, err := ctl.Call(jctx, proto.TypeJobStartReq, proto.JobStartReq{Cmd: "printf job-output-here"})
+	if err != nil {
+		t.Fatalf("job start: %v", err)
+	}
+	var jsr proto.JobStartResp
+	proto.Unmarshal(startF.Body, &jsr)
+	if jsr.ID == "" {
+		t.Fatalf("job start returned no id: %+v", jsr)
+	}
+
+	var jobDone bool
+	for i := 0; i < 100 && !jobDone; i++ {
+		listF, err := ctl.Call(jctx, proto.TypeJobListReq, proto.JobListReq{})
+		if err != nil {
+			t.Fatalf("job list: %v", err)
+		}
+		var jlr proto.JobListResp
+		proto.Unmarshal(listF.Body, &jlr)
+		if len(jlr.Jobs) == 1 && jlr.Jobs[0].ID == jsr.ID && jlr.Jobs[0].State == "done" {
+			jobDone = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !jobDone {
+		t.Fatal("detached job did not reach done state")
+	}
+
+	logStream, err := transport.OpenStream(sess, transport.StreamJobLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr, _ := json.Marshal(proto.JobLogReq{ID: jsr.ID, Follow: false})
+	if _, err := logStream.Write(append(hdr, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	logBytes, _ := io.ReadAll(logStream)
+	if !strings.Contains(string(logBytes), "job-output-here") {
+		t.Fatalf("job log = %q, want it to contain the printf output", logBytes)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/taehyun/lg/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
 )
 
 // IsMounted reports whether path is a mount point (its device differs from its

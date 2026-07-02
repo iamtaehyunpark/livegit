@@ -12,10 +12,10 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/fuse"
+	"github.com/iamtaehyunpark/livegit/internal/shell"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/fuse"
-	"github.com/taehyun/lg/internal/shell"
 )
 
 func newShellCmd() *cobra.Command {
@@ -117,7 +117,7 @@ func runShell() error {
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// default_target=source: start with toggle mode ON, so every command in this
-	// shell runs on Source from the outset (§1.2). The mount stays live; `lg
+	// shell runs on Source from the outset. The mount stays live; `lg
 	// toggle` (or `lg local`) drops back to a normal local shell.
 	if c.DefaultTarget == "source" {
 		_ = shell.SetToggle(tabID, true)

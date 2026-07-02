@@ -8,14 +8,14 @@ import (
 	"sort"
 	"time"
 
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/hashx"
-	"github.com/taehyun/lg/internal/logx"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/hashx"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // FileServer answers Ghost's file-RPC requests against Source's real disk
-// rooted at remoteRoot. It is the Source half of the FUSE backend (§3.1).
+// rooted at remoteRoot. It is the Source half of the FUSE backend.
 type FileServer struct {
 	root    string // absolute remote_root
 	mapper  *config.PathMapper
@@ -115,7 +115,7 @@ func (fs *FileServer) read(rel string) (proto.ReadResp, error) {
 	}, nil
 }
 
-// write applies a journal-flush from Ghost, with conflict detection per §4.4:
+// write applies a journal-flush from Ghost, with conflict detection:
 // if Source's current content hash differs from the BaseHash Ghost synced from,
 // the two sides diverged — back up Source's current version before overwriting.
 func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
@@ -188,7 +188,7 @@ func (fs *FileServer) list(rel string) (proto.ListResp, error) {
 	for _, e := range entries {
 		childRel := config.Rel(config.Rel(rel) + "/" + e.Name())
 		if fs.matcher != nil && fs.matcher.Match(childRel, e.IsDir()) {
-			continue // honor .lgignore on the watcher/list side too (§4.6)
+			continue // honor .lgignore on the watcher/list side too
 		}
 		info, err := e.Info()
 		if err != nil {
@@ -208,7 +208,7 @@ func (fs *FileServer) list(rel string) (proto.ListResp, error) {
 // tree walks the entire remote root and returns one TreeEntry per file/dir
 // (honoring .lgignore), so Ghost can render the whole mount eagerly. Content
 // hashes are left empty here — walking 50k files to hash them all would be slow;
-// Ghost fills the hash lazily on first read (§2 OneDrive-style).
+// Ghost fills the hash lazily on first read (OneDrive-style).
 func (fs *FileServer) tree() (proto.TreeResp, error) {
 	var out proto.TreeResp
 	err := filepath.WalkDir(fs.root, func(abs string, d os.DirEntry, err error) error {

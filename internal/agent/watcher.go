@@ -5,15 +5,15 @@ import (
 	"path/filepath"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/hashx"
-	"github.com/taehyun/lg/internal/logx"
-	"github.com/taehyun/lg/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/hashx"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
 // Watcher detects changes to Source's real files and pushes lazy "invalidated"
-// notifications to Ghost (§4.3) — metadata only, never content. It shares the
-// ignore matcher so it never pushes for excluded paths (§4.6, §7).
+// notifications to Ghost — metadata only, never content. It shares the
+// ignore matcher so it never pushes for excluded paths.
 type Watcher struct {
 	root    string
 	mapper  *config.PathMapper

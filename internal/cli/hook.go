@@ -3,8 +3,8 @@ package cli
 import (
 	"os"
 
+	"github.com/iamtaehyunpark/livegit/internal/shell"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/shell"
 )
 
 // newHookCmd groups the fast, short-lived callbacks the shell integration runs

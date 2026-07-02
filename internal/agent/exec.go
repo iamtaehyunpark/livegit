@@ -12,15 +12,15 @@ import (
 	"sync/atomic"
 
 	"github.com/creack/pty"
-	"github.com/taehyun/lg/internal/logx"
-	"github.com/taehyun/lg/internal/proto"
-	"github.com/taehyun/lg/internal/transport"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
+	"github.com/iamtaehyunpark/livegit/internal/proto"
+	"github.com/iamtaehyunpark/livegit/internal/transport"
 )
 
 // execHub runs one command per invocation inside a real PTY, bridging the
 // pty<->yamux streams. It replaces the old tmux session-pairing model: there is
 // no persistent named session, just "run this command, stream it, return the
-// exit code" — the Pivot Directive's command runner (§1).
+// exit code" — the command runner.
 //
 // Pairing mirrors the old protocol: Ghost sends ExecReq on the control stream
 // and gets back a token; it then opens the data stream and writes that token as
@@ -131,10 +131,10 @@ func (h *execHub) serveData(stream io.ReadWriteCloser) {
 	// open until it sees ExecExit). The exit is driven by the output side: when
 	// the process dies the pty EOFs and the output copy returns.
 	go func() {
-		if n := br.Buffered(); n > 0 {
-			peek, _ := br.Peek(n)
-			_, _ = ptmx.Write(peek)
-		}
+		// io.Copy uses bufio.Reader.WriteTo, which flushes any bytes already
+		// buffered by the token-line read before draining the stream — so stdin
+		// bundled with the token line is forwarded exactly once. (An earlier
+		// Peek-then-Copy here double-wrote those buffered bytes to the PTY.)
 		_, _ = io.Copy(ptmx, br) // Ghost input (incl. in-band Ctrl-C) to remote
 	}()
 	_, _ = io.Copy(stream, ptmx) // remote output to Ghost; returns on process exit
@@ -159,13 +159,21 @@ func (h *execHub) finish(token string, code int, ctl *transport.Endpoint) {
 
 // resolveDir maps a rel cwd to an absolute remote path under the root. A rel
 // that escapes the root (or is empty) falls back to the root itself.
-func (h *execHub) resolveDir(rel string) string {
+func (h *execHub) resolveDir(rel string) string { return resolveDir(h.remoteRoot, rel) }
+
+// resolveDir is the shared cwd mapper used by both the exec hub and the job
+// manager: a rel path under remoteRoot, clamped to the root (an empty or
+// escaping rel resolves to the root itself).
+func resolveDir(remoteRoot, rel string) string {
 	if rel == "" || rel == "." {
-		return h.remoteRoot
+		return remoteRoot
 	}
-	abs := filepath.Join(h.remoteRoot, filepath.FromSlash(rel))
-	if !strings.HasPrefix(abs, h.remoteRoot) {
-		return h.remoteRoot
+	abs := filepath.Join(remoteRoot, filepath.FromSlash(rel))
+	// Clamp to the root: reject an abs that escaped it via "..". A bare prefix
+	// check is not enough — it would accept a sibling like "<root>-evil", so
+	// require an exact match or a real path-separator boundary.
+	if abs != remoteRoot && !strings.HasPrefix(abs, remoteRoot+string(filepath.Separator)) {
+		return remoteRoot
 	}
 	return abs
 }

@@ -5,15 +5,15 @@ package cli
 import (
 	"fmt"
 
+	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/logx"
 	"github.com/spf13/cobra"
-	"github.com/taehyun/lg/internal/config"
-	"github.com/taehyun/lg/internal/logx"
 )
 
 var logLevel string
 
 // Version is the build version, injected at link time via -ldflags
-// "-X github.com/taehyun/lg/internal/cli.Version=...". Defaults to "dev".
+// "-X github.com/iamtaehyunpark/livegit/internal/cli.Version=...". Defaults to "dev".
 var Version = "dev"
 
 // NewRoot builds the root command tree.
@@ -47,6 +47,8 @@ func NewRoot() *cobra.Command {
 		newShellCmd(),
 		newUnmountCmd(),
 		newRunCmd(),
+		newJobsCmd(),
+		newLogsCmd(),
 		newToggleCmd(),
 		newLocalCmd(),
 		newStatusCmd(),
@@ -57,7 +59,7 @@ func NewRoot() *cobra.Command {
 
 // IsKnownSubcommand reports whether name matches a registered subcommand (or a
 // built-in like help/completion) of root. Used by the bare-command passthrough
-// in main: `lg <anything-else>` runs <anything-else> on Source (§1.1).
+// in main: `lg <anything-else>` runs <anything-else> on Source.
 func IsKnownSubcommand(root *cobra.Command, name string) bool {
 	switch name {
 	case "help", "completion", "__complete", "__completeNoDesc":
@@ -80,5 +82,5 @@ func IsKnownSubcommand(root *cobra.Command, name string) bool {
 // main calls this when the first arg is not a known subcommand or flag.
 func RunPassthrough(argv []string) int {
 	logx.Init(logLevel, nil)
-	return runRemote(argv, false) // explicit `lg <cmd>`: strict remote, no local fallback
+	return runRemote(argv, false, false) // explicit `lg <cmd>`: strict remote, no local fallback
 }
