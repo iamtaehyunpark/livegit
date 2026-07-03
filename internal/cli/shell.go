@@ -66,6 +66,15 @@ func runShell() error {
 		fmt.Fprintf(os.Stderr, "lg: cleaned up a stale mount at %s\n", c.LocalRoot)
 	}
 
+	// A LIVE mount that survived the stale check means another `lg shell` is
+	// already serving this project. Without this check the run continues into a
+	// bogus "directory is not empty" warning (IsNonEmptyDir reads the *mounted*
+	// tree) and then a confusing double-mount failure.
+	if fuse.IsMounted(c.LocalRoot) {
+		return fmt.Errorf("%s is already mounted — another `lg shell` for this project is running.\n"+
+			"Use that shell (or `exit` it first). If it's actually gone, run:  lg unmount", c.LocalRoot)
+	}
+
 	// Mounting over a populated directory hides those files while active. Warn
 	// loudly — local_root is meant to be an empty mount point.
 	if fuse.IsNonEmptyDir(c.LocalRoot) {

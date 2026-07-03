@@ -194,7 +194,9 @@ to `GUIDE.md`) — a concise operating guide that teaches an agent how to drive
 `lg`: how to run things on the server, how output streams, how the local↔remote
 paths map, and how to edit files the right way. Point your agent at it once and
 it behaves as if it natively understood the split between your laptop and the
-server — no hand-holding per command.
+server — no hand-holding per command. Both guides carry a marker line and are
+refreshed automatically by `lg connect` when you upgrade lg (remove the marker
+to keep your own copy).
 
 A typical loop looks like this. Link a server-side repo — even an empty one —
 with `lg init`, mount it with `lg shell`, then start your agent in the mounted

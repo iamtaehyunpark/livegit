@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/iamtaehyunpark/livegit/internal/agentbin"
 	"github.com/iamtaehyunpark/livegit/internal/config"
@@ -76,6 +77,11 @@ agent that can't answer a Duo prompt), or to check/reset the connection.`,
 // (showing any Duo prompt on the terminal); with force set it closes a live
 // master first so the authentication — and its cached window — start fresh.
 func establishConnection(cfg *config.Config, force bool) error {
+	// Keep the project-root guides in step with this binary — the docs
+	// counterpart of the agent auto-upgrade below. Purely local, so it runs
+	// before (and regardless of) any authentication.
+	syncProjectDocs(filepath.Dir(config.Dir()))
+
 	if cfg.Source.SSHMode == "native" {
 		fmt.Printf("Testing the stored credentials against %s …\n", cfg.Source.Host)
 		if err := transport.VerifyNative(cfg); err != nil {

@@ -11,7 +11,6 @@ import (
 
 	"github.com/iamtaehyunpark/livegit/internal/agentbin"
 	"github.com/iamtaehyunpark/livegit/internal/config"
-	"github.com/iamtaehyunpark/livegit/internal/docs"
 	"github.com/iamtaehyunpark/livegit/internal/transport"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -260,20 +259,10 @@ func writeConfig(in *wizardInput, skipConfirm bool) error {
 	fmt.Printf("\n✓ wrote %s\n", cfgPath)
 
 	// Drop the guides into the project root (next to .lg/) so any CLI or coding
-	// agent working here references them natively. Don't clobber a copy the user
-	// may have edited — only write when absent.
+	// agent working here references them natively. Marker-gated (see docs.go):
+	// lg-written copies refresh on upgrade, unmarked user files are left alone.
 	projectRoot := filepath.Dir(initDir)
-	for _, d := range docs.Files() {
-		dst := filepath.Join(projectRoot, d.Name)
-		if _, err := os.Stat(dst); err == nil {
-			continue // already there — leave the user's copy alone
-		}
-		if err := os.WriteFile(dst, d.Content, 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "lg: warning: couldn't write %s: %v\n", dst, err)
-			continue
-		}
-		fmt.Printf("✓ wrote %s\n", dst)
-	}
+	syncProjectDocs(projectRoot)
 
 	if c.Role == config.RoleSource {
 		fmt.Println("\nThis machine is the Source. Make sure `lg` is on its PATH;")
