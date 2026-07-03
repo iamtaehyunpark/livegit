@@ -8,27 +8,27 @@
 class Lg < Formula
   desc "Live Git — run commands on a remote server and browse its tree locally"
   homepage "https://github.com/iamtaehyunpark/livegit"
-  version "1.2.1"
+  version "1.2.2"
 
   on_macos do
     on_arm do
-      url "https://github.com/iamtaehyunpark/livegit/releases/download/v1.2.1/lg-darwin-arm64"
-      sha256 "23ae44c3e71f955c281949d8ec589c420c8c589ba305885a9cfb93701f637499"
+      url "https://github.com/iamtaehyunpark/livegit/releases/download/v1.2.2/lg-darwin-arm64"
+      sha256 "bdf41d8577c119b256b1ed50c2d45b62d78efa26098a30c5c8f88e852a4bc16e"
     end
     on_intel do
-      url "https://github.com/iamtaehyunpark/livegit/releases/download/v1.2.1/lg-darwin-amd64"
-      sha256 "0e35676bfc08bd4d28ebb0c7359b80112169d6d0cbd63ac19920c6f88d4a3979"
+      url "https://github.com/iamtaehyunpark/livegit/releases/download/v1.2.2/lg-darwin-amd64"
+      sha256 "2b71e6c7591795c8e3163cb94ba78b8d2b77629163b1269840dfe02a6d4c1254"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/iamtaehyunpark/livegit/releases/download/v1.2.1/lg-linux-arm64"
-      sha256 "df87e2af4c9f2cb43387a78c9475490ccb02226e65e3d8a26bf3b1c4765557d8"
+      url "https://github.com/iamtaehyunpark/livegit/releases/download/v1.2.2/lg-linux-arm64"
+      sha256 "989686c5ddcdc459f77959650d78896f539764d361c03ac37c4661e466e86582"
     end
     on_intel do
-      url "https://github.com/iamtaehyunpark/livegit/releases/download/v1.2.1/lg-linux-amd64"
-      sha256 "2e2fa74e854570de3a5bca8df51389911698d64dd85f1c30e65d06ff98cd2b09"
+      url "https://github.com/iamtaehyunpark/livegit/releases/download/v1.2.2/lg-linux-amd64"
+      sha256 "57aacc300548b68b43eb90259a8b9081a4541d4e86283dc95026cf36231aa92a"
     end
   end
 
