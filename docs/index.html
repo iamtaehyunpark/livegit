@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>livegit</title>
+  <meta name="description" content="livegit (lg) — run commands on a remote server with live output. Mount the full remote file tree so your editor opens it like a local folder.">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #ffffff;
+      --bg-off:   #f7f7f7;
+      --border:   #e5e5e5;
+      --text:     #111111;
+      --sub:      #6b6b6b;
+      --dim:      #b0b0b0;
+      --accent:   #4f46e5;
+      --term-bg:  #0e0e13;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    code { font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace; }
+
+    /* ── Container ── */
+    .wrap { max-width: 960px; margin: 0 auto; padding: 0 40px; }
+
+    /* ── Nav ── */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(255,255,255,0.9);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: 960px; margin: 0 auto; padding: 0 40px;
+      height: 56px; display: flex; align-items: center; justify-content: space-between;
+    }
+    .logo {
+      font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+      font-size: 1rem; font-weight: 700; letter-spacing: -0.02em;
+      color: var(--text);
+    }
+    .logo span { color: var(--accent); }
+    .nav-links { display: flex; align-items: center; gap: 24px; }
+    .nav-links a {
+      font-size: 0.8125rem; color: var(--sub);
+      transition: color 0.12s;
+    }
+    .nav-links a:hover { color: var(--text); }
+    .nav-gh {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: var(--text) !important;
+      border: 1px solid var(--border);
+      padding: 5px 13px; border-radius: 6px;
+      font-weight: 500;
+      transition: border-color 0.12s !important;
+    }
+    .nav-gh:hover { border-color: #999 !important; }
+
+    /* ── Hero ── */
+    #hero {
+      padding: 100px 0 80px;
+      text-align: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .hero-label {
+      display: inline-block;
+      font-size: 0.75rem; font-weight: 600;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--accent); margin-bottom: 24px;
+    }
+    #hero h1 {
+      font-size: clamp(2.5rem, 5.5vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.045em;
+      line-height: 1.05;
+      margin-bottom: 24px;
+    }
+    #hero h1 em { font-style: normal; color: var(--sub); }
+    .hero-sub {
+      font-size: 1.125rem;
+      color: var(--sub);
+      max-width: 560px;
+      margin: 0 auto 36px;
+      line-height: 1.65;
+    }
+    .hero-sub code { font-size: 1rem; color: var(--accent); }
+    .hero-actions {
+      display: flex; align-items: center; justify-content: center;
+      gap: 10px; flex-wrap: wrap; margin-bottom: 64px;
+    }
+    .btn {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 10px 22px; border-radius: 7px;
+      font-size: 0.875rem; font-weight: 500;
+      transition: all 0.12s; cursor: pointer;
+    }
+    .btn-dark { background: var(--text); color: #fff; }
+    .btn-dark:hover { background: #333; }
+    .btn-border { border: 1px solid var(--border); color: var(--sub); }
+    .btn-border:hover { border-color: #999; color: var(--text); }
+
+    /* Hero terminal — full container width */
+    .hero-term {
+      background: var(--term-bg);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 12px;
+      overflow: hidden;
+      text-align: left;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.12);
+    }
+    .term-bar {
+      padding: 12px 18px;
+      background: rgba(255,255,255,0.03);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex; align-items: center; gap: 7px;
+    }
+    .dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+    .d-r { background: #ff5f56; } .d-y { background: #ffbd2e; } .d-g { background: #27c93f; }
+    .term-path {
+      margin-left: 8px;
+      font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+      font-size: 0.75rem; color: rgba(255,255,255,0.25);
+    }
+    .term-body {
+      padding: 22px 28px;
+      font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+      font-size: 13px; line-height: 1.75;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0 48px;
+    }
+    .term-col { }
+    .t-dim    { color: #444; }
+    .t-prompt { color: #3ecf69; }
+    .t-cmd    { color: #d4d4d4; }
+    .t-kw     { color: #7c7cf7; font-weight: 600; }
+    .t-out    { color: #555; }
+    .t-ok     { color: #3ecf69; }
+    .t-num    { color: #e09c30; }
+    .t-gap    { display: block; height: 8px; }
+    .term-divider {
+      grid-column: 1 / -1;
+      border: none; border-top: 1px solid rgba(255,255,255,0.05);
+      margin: 16px 0;
+    }
+
+    /* ── Section base ── */
+    section { padding: 96px 0; border-bottom: 1px solid var(--border); }
+    section.bg-off { background: var(--bg-off); }
+
+    .kicker {
+      font-size: 0.72rem; font-weight: 700;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      color: var(--accent); margin-bottom: 10px;
+    }
+    h2 {
+      font-size: clamp(1.75rem, 3vw, 2.25rem);
+      font-weight: 750; letter-spacing: -0.03em; line-height: 1.15;
+      margin-bottom: 14px;
+    }
+    .lead {
+      font-size: 1.0625rem; color: var(--sub);
+      line-height: 1.65; margin-bottom: 52px;
+      max-width: 540px;
+    }
+
+    /* ── Problem cards ── */
+    .problem-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 2px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .prob-card {
+      background: var(--bg);
+      padding: 36px 32px 40px;
+    }
+    .prob-n {
+      font-family: 'JetBrains Mono', Consolas, monospace;
+      font-size: 0.72rem; color: var(--dim);
+      margin-bottom: 20px; display: block;
+    }
+    .prob-title {
+      font-size: 0.9375rem; font-weight: 600;
+      margin-bottom: 10px; line-height: 1.35;
+    }
+    .prob-card p {
+      font-size: 0.875rem; color: var(--sub); line-height: 1.65;
+    }
+    .prob-card code { color: var(--accent); font-size: 0.825rem; }
+
+    /* ── Split ── */
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 72px;
+      align-items: start;
+    }
+    /* Without min-width:0, pre blocks force grid columns wider than 1fr */
+    .split > * { min-width: 0; }
+    .split-text h3 {
+      font-size: 1.5rem; font-weight: 700;
+      letter-spacing: -0.025em; line-height: 1.2;
+      margin-bottom: 14px;
+    }
+    .split-text p {
+      font-size: 0.9375rem; color: var(--sub);
+      line-height: 1.7; margin-bottom: 18px;
+    }
+    .split-text ul {
+      list-style: none; display: flex; flex-direction: column; gap: 9px;
+    }
+    .split-text li {
+      font-size: 0.875rem; color: var(--sub);
+      padding-left: 20px; position: relative;
+    }
+    .split-text li::before { content: '→'; color: var(--dim); position: absolute; left: 0; }
+    .split-text li code { color: var(--accent); font-size: 0.8rem; }
+
+    /* ── Code window ── */
+    .code-win {
+      background: var(--term-bg);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 10px; overflow: hidden;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+    }
+    .code-bar {
+      padding: 10px 16px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      display: flex; align-items: center; gap: 6px;
+    }
+    .code-bar .dot { width: 10px; height: 10px; opacity: 0.7; }
+    .code-bar .file {
+      margin-left: 8px;
+      font-family: monospace; font-size: 0.72rem;
+      color: rgba(255,255,255,0.2);
+    }
+    pre {
+      padding: 22px 24px;
+      font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+      font-size: 12.5px; line-height: 1.8;
+      overflow-x: auto; color: #c0c0c0;
+    }
+    pre .p { color: #3ecf69; }
+    pre .k { color: #7c7cf7; font-weight: 600; }
+    pre .g { color: #3ecf69; }
+    pre .a { color: #e09c30; }
+    pre .m { color: #555; }
+    pre .c { color: #444; }
+
+    /* ── Agents ── */
+    .agent-wrap {
+      background: var(--bg-off);
+      border: 1px solid var(--border);
+      border-radius: 14px; overflow: hidden;
+    }
+    .agent-head {
+      padding: 52px 52px 44px;
+      border-bottom: 1px solid var(--border);
+    }
+    .agent-head h2 { margin-bottom: 14px; }
+    .agent-head p { font-size: 1.0625rem; color: var(--sub); max-width: 600px; line-height: 1.7; }
+    .agent-head code { color: var(--accent); font-size: 0.95rem; }
+    .agent-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      background: var(--border); gap: 1px;
+    }
+    .agent-cell {
+      background: var(--bg-off);
+      padding: 32px 28px 36px;
+    }
+    .cell-n {
+      font-family: monospace; font-size: 0.7rem;
+      color: var(--dim); margin-bottom: 14px; display: block;
+      letter-spacing: 0.05em;
+    }
+    .agent-cell h4 { font-size: 0.9375rem; font-weight: 600; margin-bottom: 8px; }
+    .agent-cell p { font-size: 0.85rem; color: var(--sub); line-height: 1.6; }
+    .agent-cell code { color: var(--accent); font-size: 0.8rem; }
+
+    /* ── Install ── */
+    #install { text-align: center; }
+    .inst-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr);
+      gap: 12px; text-align: left; margin: 44px 0 16px;
+    }
+    .inst-card {
+      border: 1px solid var(--border); border-radius: 9px; overflow: hidden;
+    }
+    .inst-head {
+      padding: 9px 16px;
+      background: var(--bg-off);
+      border-bottom: 1px solid var(--border);
+      font-size: 0.7rem; font-weight: 700;
+      letter-spacing: 0.07em; text-transform: uppercase; color: var(--dim);
+    }
+    .inst-card pre { padding: 16px 18px; font-size: 12px; line-height: 1.75; }
+
+    .quickstart { margin-top: 12px; text-align: left; }
+    .qs-head {
+      padding: 9px 16px;
+      background: var(--bg-off);
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      font-size: 0.7rem; font-weight: 700;
+      letter-spacing: 0.07em; text-transform: uppercase;
+      color: rgba(255,255,255,0.25);
+    }
+    .install-note {
+      margin-top: 18px; font-size: 0.825rem; color: var(--dim);
+    }
+    .install-note a { color: var(--sub); text-decoration: underline; text-underline-offset: 2px; }
+    .install-note code { color: var(--accent); font-size: 0.8rem; }
+
+    /* ── Commands table ── */
+    .cmd-tbl { width: 100%; border-collapse: collapse; }
+    .cmd-tbl th {
+      text-align: left; padding: 0 0 12px;
+      font-size: 0.7rem; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--dim); border-bottom: 1px solid var(--border);
+    }
+    .cmd-tbl th:first-child { width: 40%; padding-right: 40px; }
+    .cmd-tbl td {
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.875rem; vertical-align: top;
+    }
+    .cmd-tbl td:first-child { padding-right: 40px; white-space: nowrap; }
+    .cmd-tbl td code { color: var(--accent); font-size: 0.8rem; }
+    .cmd-tbl td:last-child { color: var(--sub); }
+    .cmd-tbl tr:last-child td { border-bottom: none; }
+    .cmd-tbl tr:hover td { background: var(--bg-off); }
+    .tbl-group td {
+      padding-top: 30px !important;
+      font-size: 0.7rem; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: var(--dim); border-bottom: none !important;
+    }
+    .tbl-group:hover td { background: transparent !important; }
+
+    /* ── Footer ── */
+    footer {
+      padding: 32px 0;
+      border-top: 1px solid var(--border);
+    }
+    .foot-row {
+      max-width: 960px; margin: 0 auto; padding: 0 40px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .foot-row p, .foot-row a { font-size: 0.8125rem; color: var(--dim); }
+    .foot-row a:hover { color: var(--sub); }
+
+    /* ── Responsive ── */
+    @media (max-width: 860px) {
+      .wrap, .nav-inner, .foot-row { padding-left: 24px; padding-right: 24px; }
+      .hero-sub { font-size: 1rem; }
+      .term-body { grid-template-columns: 1fr; gap: 0; }
+      .term-col + .term-col { margin-top: 8px; }
+      hr.term-divider { display: none; }
+      .problem-grid { grid-template-columns: 1fr; }
+      .split { grid-template-columns: 1fr; gap: 40px; }
+      .split.rev .code-win { order: -1; }
+      .agent-grid { grid-template-columns: 1fr 1fr; }
+      .inst-grid { grid-template-columns: 1fr; }
+      .foot-row { flex-direction: column; gap: 6px; text-align: center; }
+    }
+    @media (max-width: 560px) {
+      #hero { padding: 72px 0 60px; }
+      .agent-head { padding: 32px 24px 28px; }
+      .agent-grid { grid-template-columns: 1fr; }
+      .nav-links a:not(.nav-gh) { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Nav ──────────────────────────────────────────── -->
+<nav>
+  <div class="nav-inner">
+    <a href="#" class="logo">live<span>git</span></a>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#agents">For agents</a>
+      <a href="#install">Install</a>
+      <a href="#ref">Reference</a>
+      <a href="https://github.com/iamtaehyunpark/livegit" class="nav-gh">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.49.5.09.682-.218.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.155-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0 1 12 6.844a9.59 9.59 0 0 1 2.504.337c1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.415-.012 2.741 0 .268.18.58.688.482A10.02 10.02 0 0 0 22 12c0-5.523-4.477-10-10-10z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<!-- ── Hero ─────────────────────────────────────────── -->
+<section id="hero">
+  <div class="wrap">
+    <div class="hero-label">Open Source · Single Binary · macOS &amp; Linux</div>
+
+    <h1>A whole GPU server,<br><em>bolted to your laptop.</em></h1>
+
+    <p class="hero-sub">
+      livegit (<code>lg</code>) links your laptop to a GPU server: run any command on it with live output, and mount the full file tree so your editor opens it like a local folder. And let your coding agent do the same.
+    </p>
+
+    <div class="hero-actions">
+      <a href="#install" class="btn btn-dark">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>
+        Install
+      </a>
+      <a href="https://github.com/iamtaehyunpark/livegit" class="btn btn-border">View on GitHub</a>
+    </div>
+
+    <div class="hero-term">
+      <div class="term-bar">
+        <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
+        <span class="term-path">~/myproject</span>
+      </div>
+      <div class="term-body">
+        <div class="term-col">
+          <div class="t-dim"># run a training script on the GPU server</div>
+          <div><span class="t-prompt">$</span> <span class="t-kw">lg</span> <span class="t-cmd">python train.py --epochs 50</span></div>
+          <span class="t-gap"></span>
+          <div class="t-out">Epoch  1/50  loss=2.314  <span style="color:#27c93f">███</span><span style="color:#222">░░░░░░░░░░</span>  ~14m</div>
+          <div class="t-out">Epoch 20/50  loss=1.022  <span style="color:#27c93f">████████</span><span style="color:#222">░░░░░░░</span>   ~9m</div>
+          <div class="t-out">Epoch 50/50  loss=0.203  <span style="color:#27c93f">███████████████</span>  done</div>
+          <div class="t-ok">✓  saved to ./checkpoints/epoch-50.pt</div>
+        </div>
+
+        <hr class="term-divider">
+
+        <div class="term-col">
+          <div class="t-dim"># open the server's entire codebase in VS Code</div>
+          <div><span class="t-prompt">$</span> <span class="t-kw">lg mount</span></div>
+          <div class="t-out">synced <span class="t-num">3 196</span> files  →  <span class="t-ok">myrepo/ (browsable now)</span></div>
+          <span class="t-gap"></span>
+          <div><span class="t-prompt">$</span> <span class="t-cmd">code myrepo/</span></div>
+          <div class="t-out"><span style="color:#444"># the full tree is local — edit here, changes sync back</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Problem / How it works ───────────────────────── -->
+<section id="how">
+  <div class="wrap">
+    <div class="kicker">The problem it solves</div>
+    <h2>GPU server work is painful.<br>livegit fixes the three worst parts.</h2>
+    <p class="lead">You have a server. You want to code on your laptop, run on the GPU, and see what happens — without SSH sessions, without rsync, without living in a remote shell.</p>
+
+    <div class="problem-grid">
+      <div class="prob-card">
+        <span class="prob-n">01</span>
+        <div class="prob-title">Instead of SSH-ing in to run one command</div>
+        <p>Type <code>lg</code> before any command. It runs on the server in a real terminal. You see output as it arrives — training loss, test results, GPU stats — with colors, progress bars, and Ctrl-C. <code>$?</code> is the remote exit code.</p>
+      </div>
+      <div class="prob-card">
+        <span class="prob-n">02</span>
+        <div class="prob-title">Instead of rsync-ing files back and forth</div>
+        <p><code>lg mount</code> makes the server's entire repo appear as a normal local folder — instantly, even for huge repos. Open it in VS Code. Files download when you open them. Changes you save sync back to the server in milliseconds.</p>
+      </div>
+      <div class="prob-card">
+        <span class="prob-n">03</span>
+        <div class="prob-title">Instead of babysitting long training runs</div>
+        <p><code>lg run -d</code> detaches the job from your session. It keeps running when your laptop sleeps, when you close the terminal, when the connection drops. Pick up the logs later with <code>lg logs -f</code>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Agents ────────────────────────────────────────── -->
+<section id="agents">
+  <div class="wrap">
+    <div class="agent-wrap">
+      <div class="agent-head">
+        <div class="kicker">AI-agent native</div>
+        <h2>Let a coding agent drive<br>your GPU server.</h2>
+        <p>Agents like Claude Code can't SSH in, can't respond to Duo prompts, can't live in a remote shell. livegit solves this: mount the remote tree so the agent has real local files to read and edit, and let it call <code>lg</code> to run things on the server and see the output. <code>lg init</code> drops an <code>AGENTS.md</code> into your project — a complete operating manual that teaches the agent exactly how to drive livegit from the first prompt.</p>
+      </div>
+      <div class="agent-grid">
+        <div class="agent-cell">
+          <span class="cell-n">01</span>
+          <h4>Reads and edits code via the mount</h4>
+          <p>The agent uses its normal file tools on <code>myrepo/</code>. It's a real local folder. Saves sync to the server automatically.</p>
+        </div>
+        <div class="agent-cell">
+          <span class="cell-n">02</span>
+          <h4>Runs experiments on the GPU</h4>
+          <p>The agent calls <code>lg python train.py</code> and reads the live output — loss, accuracy, errors — as the job runs on the server.</p>
+        </div>
+        <div class="agent-cell">
+          <span class="cell-n">03</span>
+          <h4>Leaves long jobs running</h4>
+          <p>For multi-hour runs, the agent uses <code>lg run -d</code>. The job outlives the context window. It reconnects with <code>lg logs -f</code>.</p>
+        </div>
+        <div class="agent-cell">
+          <span class="cell-n">04</span>
+          <h4>Iterates without hand-holding</h4>
+          <p>Fix the bug, retrain, read the new results. The full loop runs without a human in the middle — because the server feels local.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Command runner ────────────────────────────────── -->
+<section class="bg-off">
+  <div class="wrap">
+    <div class="split">
+      <div class="split-text">
+        <div class="kicker">Command runner</div>
+        <h3>You want to run something on the server. Just run it.</h3>
+        <p>Any command prefixed with <code style="color:var(--accent)">lg</code> runs on the server in the directory that matches your local cwd. The output streams to your terminal the moment it's written. When it finishes, <code style="color:var(--accent)">$?</code> is the remote exit code.</p>
+        <p>It's a real PTY, so <code style="color:var(--accent)">tqdm</code> progress bars render, pytest colors work, htop shows the remote CPU. Ctrl-C interrupts the remote process. No magic, no buffering — just SSH behavior without the SSH ceremony.</p>
+        <ul>
+          <li>Toggle mode — <code>lg toggle</code> makes every command go remote until <code>lg local</code></li>
+          <li>Exit codes propagate — <code>lg pytest && lg deploy.sh</code> works as expected</li>
+          <li>Runs in the matching directory — no need to specify remote paths</li>
+        </ul>
+      </div>
+      <div class="code-win">
+        <div class="code-bar">
+          <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
+          <span class="file">shell</span>
+        </div>
+        <pre><span class="p">$</span> <span class="k">lg</span> nvidia-smi
+<span class="g">A100 80GB  42°C  3.1/80 GB  [idle]</span>
+
+<span class="p">$</span> <span class="k">lg</span> pytest -q
+<span class="m">............  12 passed in 0.4s</span>
+<span class="p">$</span> echo $?
+<span class="a">0</span>
+
+<span class="c"># toggle: every command goes remote</span>
+<span class="p">$</span> <span class="k">lg toggle</span>
+<span class="m">remote ↗  all commands → server</span>
+<span class="p">$</span> python train.py  <span class="c"># runs on GPU</span>
+<span class="p">$</span> make test        <span class="c"># also remote</span>
+<span class="p">$</span> <span class="k">lg local</span>         <span class="c"># back to local</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── File mount ────────────────────────────────────── -->
+<section>
+  <div class="wrap">
+    <div class="split rev">
+      <div class="code-win">
+        <div class="code-bar">
+          <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
+          <span class="file">shell</span>
+        </div>
+        <pre><span class="p">$</span> <span class="k">lg mount</span>
+<span class="g">✓  3 196 files synced  →  myrepo/</span>
+
+<span class="c"># grep, find, diff — your native tools</span>
+<span class="p">$</span> grep -r "learning_rate" myrepo/
+<span class="m">configs/sweep.yaml:  learning_rate: 3e-4</span>
+<span class="m">train.py:  lr = config.learning_rate</span>
+
+<span class="c"># edit locally, run on server — in order</span>
+<span class="p">$</span> vim myrepo/configs/sweep.yaml
+<span class="p">$</span> <span class="k">lg</span> python train.py
+
+<span class="p">$</span> <span class="k">lg unmount</span>  <span class="c"># or leave it mounted</span></pre>
+      </div>
+      <div class="split-text">
+        <div class="kicker">File mount</div>
+        <h3>Open VS Code.<br>That's your server's code.</h3>
+        <p><code style="color:var(--accent)">lg mount</code> makes the remote repo appear as a local folder. The full directory tree — every file, every folder, real sizes — is there the instant the mount starts, like OneDrive placeholder files. You don't wait for a sync to finish.</p>
+        <p>Open a file: its content downloads. Save a file: it's on the server within milliseconds. When you run <code style="color:var(--accent)">lg python train.py</code> after editing, livegit waits for any pending writes to land first — so you never race yourself.</p>
+        <ul>
+          <li>Full tree visible instantly, even for huge repos</li>
+          <li>Server-side changes appear within ~1 second</li>
+          <li>Headless — works in scripts and agents without a shell</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Detached jobs ─────────────────────────────────── -->
+<section class="bg-off">
+  <div class="wrap">
+    <div class="split">
+      <div class="split-text">
+        <div class="kicker">Detached jobs</div>
+        <h3>Training runs that outlive<br>your terminal.</h3>
+        <p>When you close a terminal connected to a server, everything running in that SSH session dies — nohup, setsid, even tmux — because systemd tears down the session's cgroup. livegit routes around this.</p>
+        <p><code style="color:var(--accent)">lg run -d</code> launches the job under <code style="color:var(--accent)">systemd --user</code> in a separate cgroup the SSH session can't touch. Your laptop can sleep. The connection can drop. The job keeps running. Come back hours later with <code style="color:var(--accent)">lg logs -f</code> and pick up where you left off.</p>
+        <ul>
+          <li>Ctrl-C on <code>lg logs -f</code> stops <em>following</em>, never the job</li>
+          <li>Exit codes recorded: <code>done(0)</code> / <code>done(1)</code></li>
+          <li>Kill or clean up with <code>lg jobs kill</code> / <code>lg jobs rm</code></li>
+        </ul>
+      </div>
+      <div class="code-win">
+        <div class="code-bar">
+          <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
+          <span class="file">shell</span>
+        </div>
+        <pre><span class="c"># fire and forget</span>
+<span class="p">$</span> <span class="k">lg run -d --</span> python train.py --epochs 300
+<span class="g">job  a3f7b2  started</span>
+
+<span class="c"># close your laptop. come back in 7 hours.</span>
+<span class="p">$</span> <span class="k">lg jobs</span>
+<span class="m">ID       STATE      AGE    COMMAND</span>
+<span class="m">a3f7b2   running    7h12m  python train.py</span>
+
+<span class="p">$</span> <span class="k">lg logs -f</span> a3f7b2
+<span class="m">Epoch 287/300  loss=0.18  <span style="color:#27c93f">██████████████</span>░  4m</span>
+<span class="m">Epoch 288/300  loss=0.17  <span style="color:#27c93f">██████████████</span>░  3m</span>
+<span class="m">^C  (stopped following — job still runs)</span>
+
+<span class="p">$</span> <span class="k">lg jobs</span>
+<span class="m">a3f7b2  <span style="color:#3ecf69">done(0)</span>  7h58m  python train.py</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Install ───────────────────────────────────────── -->
+<section id="install">
+  <div class="wrap" style="text-align:center">
+    <h2>Get started in two minutes</h2>
+    <p class="lead" style="margin-left:auto;margin-right:auto">
+      A single static binary — install on your laptop. <code style="color:var(--accent);font-size:0.95rem">lg init</code> deploys the matching agent to your server automatically over SSH. No compiler needed on either side.
+    </p>
+
+    <div class="inst-grid">
+      <div class="inst-card">
+        <div class="inst-head">One-line installer</div>
+        <pre style="background:var(--term-bg);color:#ccc"><span class="p">$</span> curl -fsSL https://raw.githubusercontent.com/\
+  iamtaehyunpark/livegit/main/install.sh | sh</pre>
+      </div>
+      <div class="inst-card">
+        <div class="inst-head">Homebrew</div>
+        <pre style="background:var(--term-bg);color:#ccc"><span class="p">$</span> brew tap iamtaehyunpark/livegit
+<span class="p">$</span> brew install lg</pre>
+      </div>
+      <div class="inst-card">
+        <div class="inst-head">From source (Go ≥ 1.24)</div>
+        <pre style="background:var(--term-bg);color:#ccc"><span class="p">$</span> git clone github.com/iamtaehyunpark/livegit
+<span class="p">$</span> make install  <span class="c"># → ~/.local/bin/lg</span></pre>
+      </div>
+    </div>
+
+    <div class="quickstart">
+      <div class="code-win">
+        <div class="code-bar" style="justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
+          </div>
+          <span class="file" style="color:rgba(255,255,255,0.3)">Quick start</span>
+          <span></span>
+        </div>
+        <pre><span class="c"># 1. Set up (once, per project)</span>
+<span class="p">$</span> mkdir ~/myproject && cd ~/myproject
+<span class="p">$</span> <span class="k">lg init</span>
+<span class="m">  ? role       ghost  (this laptop)
+  ? host       gpu-1.lab.example.edu
+  ? repo path  /home/you/myrepo
+  ✓ wrote .lg/config.yaml
+  ✓ deployed agent to gpu-1</span>
+<span class="c"># 2. Run something on the server</span>
+<span class="p">$</span> <span class="k">lg</span> nvidia-smi
+<span class="c"># 3. Mount the remote tree and open in your editor</span>
+<span class="p">$</span> <span class="k">lg mount</span>
+<span class="g">✓  mount ready →  ~/myproject/myrepo/</span>
+<span class="p">$</span> code ~/myproject/myrepo/</pre>
+      </div>
+    </div>
+
+    <p class="install-note">
+      <code>lg mount</code> and <code>lg shell</code> require <a href="https://osxfuse.github.io">macFUSE</a> on macOS or <code>libfuse</code> on Linux.
+      Plain <code>lg &lt;cmd&gt;</code> works without it.
+    </p>
+  </div>
+</section>
+
+<!-- ── Reference ─────────────────────────────────────── -->
+<section id="ref" class="bg-off">
+  <div class="wrap">
+    <h2>Command reference</h2>
+    <p class="lead">livegit is project-local like git — <code style="color:var(--accent)">lg init</code> writes a <code style="color:var(--accent)">.lg/</code> folder and all commands discover it by walking up from your cwd, exactly like <code style="color:var(--accent)">.git/</code>.</p>
+
+    <table class="cmd-tbl">
+      <thead>
+        <tr><th>Command</th><th>What it does</th></tr>
+      </thead>
+      <tbody>
+        <tr class="tbl-group"><td colspan="2">Running commands</td></tr>
+        <tr><td><code>lg &lt;command&gt;</code></td><td>Run on the server — live PTY, streaming output, exact exit code</td></tr>
+        <tr><td><code>lg run -- &lt;command&gt;</code></td><td>Explicit form — use when a command name collides with a subcommand</td></tr>
+        <tr><td><code>lg run -d -- &lt;command&gt;</code></td><td>Launch a detached job that outlives your session; prints a job ID</td></tr>
+        <tr><td><code>lg toggle</code> / <code>lg local</code></td><td>Make every shell command go to the server / turn that off</td></tr>
+
+        <tr class="tbl-group"><td colspan="2">File mount</td></tr>
+        <tr><td><code>lg mount</code></td><td>Mount the remote tree headlessly — returns immediately, no shell needed</td></tr>
+        <tr><td><code>lg shell</code></td><td>Mount the remote tree and open an interactive shell with auto-remote commands</td></tr>
+        <tr><td><code>lg unmount</code></td><td>Stop a headless mount; also clears stale mounts (idempotent)</td></tr>
+
+        <tr class="tbl-group"><td colspan="2">Detached jobs</td></tr>
+        <tr><td><code>lg jobs</code></td><td>List detached jobs: ID, state, age, command</td></tr>
+        <tr><td><code>lg logs &lt;id&gt;</code></td><td>Show output so far; <code>-f</code> to follow live (Ctrl-C detaches, job keeps running)</td></tr>
+        <tr><td><code>lg jobs kill &lt;id&gt;</code></td><td>Stop a running job</td></tr>
+        <tr><td><code>lg jobs rm &lt;id&gt;</code></td><td>Forget a finished job and delete its logs</td></tr>
+
+        <tr class="tbl-group"><td colspan="2">Connection</td></tr>
+        <tr><td><code>lg connect</code></td><td>Authenticate once — handles Duo / 2FA; cached for hours</td></tr>
+        <tr><td><code>lg connect --check</code></td><td>Is the connection live? Safe to call at any time</td></tr>
+        <tr><td><code>lg refresh</code></td><td>Re-authenticate now — restarts the cached window</td></tr>
+        <tr><td><code>lg disconnect</code></td><td>Close the cached connection</td></tr>
+
+        <tr class="tbl-group"><td colspan="2">Setup &amp; config</td></tr>
+        <tr><td><code>lg init</code></td><td>Set up a project — writes <code>.lg/config.yaml</code>, deploys the agent to the server</td></tr>
+        <tr><td><code>lg status</code></td><td>Connection state, toggle, tree-sync freshness, cache, pending writes</td></tr>
+        <tr><td><code>lg scan</code></td><td>Find every livegit project on this machine and show connection state</td></tr>
+        <tr><td><code>lg config get|set|show|edit</code></td><td>Inspect or change a setting (validated before saving)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── Footer ────────────────────────────────────────── -->
+<footer>
+  <div class="foot-row">
+    <p>livegit · MIT License · <a href="https://github.com/iamtaehyunpark/livegit">iamtaehyunpark/livegit</a></p>
+    <p>Built with Go · macFUSE on macOS · libfuse on Linux</p>
+  </div>
+</footer>
+
+</body>
+</html>
