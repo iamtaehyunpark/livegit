@@ -149,7 +149,22 @@ func (b *Backend) Materialize(ctx context.Context, rel string) (string, error) {
 	if mode == 0 {
 		mode = 0o644
 	}
-	if err := os.WriteFile(cp, resp.Content, mode); err != nil {
+	// Write via temp + rename: a crash or full disk mid-write must never leave a
+	// truncated file at cp — cacheFileExists would treat it as fully materialized
+	// and serve the partial bytes as the real content forever after.
+	tmp := cp + ".lg-tmp"
+	if err := os.WriteFile(tmp, resp.Content, mode); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	// Preserve Source's mtime on the cache file so Getattr (which reads the
+	// cache file's mtime) returns the correct remote timestamp, not "now".
+	if resp.ModTime > 0 {
+		t := time.Unix(resp.ModTime, 0)
+		_ = os.Chtimes(tmp, t, t)
+	}
+	if err := os.Rename(tmp, cp); err != nil {
+		_ = os.Remove(tmp)
 		return "", err
 	}
 	b.index.Put(&Entry{

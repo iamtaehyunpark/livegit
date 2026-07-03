@@ -27,13 +27,15 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu   sync.RWMutex
-	conn *sshConn
-	sess *yamux.Session
-	ctrl *Endpoint
-	file *Endpoint
+	mu         sync.RWMutex
+	conn       *sshConn
+	sess       *yamux.Session
+	ctrl       *Endpoint
+	file       *Endpoint
+	invalidate func(proto.Invalidate) // registered by FUSE layer (guarded by mu:
+	// callers register after Start(), so the supervisor goroutine may already
+	// be reading it)
 
-	invalidate  func(proto.Invalidate) // registered by FUSE layer
 	healthEvery time.Duration
 }
 
@@ -54,7 +56,11 @@ func NewClient(cfg *config.Config, remoteBin string) *Client {
 func (c *Client) Status() *Status { return c.status }
 
 // OnInvalidate registers the handler for Source->Ghost change pushes.
-func (c *Client) OnInvalidate(fn func(proto.Invalidate)) { c.invalidate = fn }
+func (c *Client) OnInvalidate(fn func(proto.Invalidate)) {
+	c.mu.Lock()
+	c.invalidate = fn
+	c.mu.Unlock()
+}
 
 // Start launches the reconnect supervisor in the background.
 func (c *Client) Start() { go c.supervise() }
@@ -95,9 +101,7 @@ func (c *Client) supervise() {
 			return
 		case <-time.After(backoff):
 		}
-		if backoff < maxBackoff {
-			backoff *= 2
-		}
+		backoff = min(backoff*2, maxBackoff)
 	}
 }
 
@@ -174,8 +178,13 @@ func (c *Client) serveNotify(stream *yamux.Stream) {
 	ep.SetHandler(func(f proto.Frame) (proto.MsgType, any, bool, error) {
 		if f.Type == proto.TypeInvalidate {
 			var inv proto.Invalidate
-			if err := proto.Unmarshal(f.Body, &inv); err == nil && c.invalidate != nil {
-				c.invalidate(inv)
+			if err := proto.Unmarshal(f.Body, &inv); err == nil {
+				c.mu.RLock()
+				fn := c.invalidate
+				c.mu.RUnlock()
+				if fn != nil {
+					fn(inv)
+				}
 			}
 		}
 		return 0, nil, false, nil // one-way push, no reply

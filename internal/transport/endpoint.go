@@ -136,7 +136,12 @@ func (e *Endpoint) Call(ctx context.Context, t proto.MsgType, body any) (proto.F
 		return proto.Frame{}, ctx.Err()
 	case <-e.closed:
 		return proto.Frame{}, e.closedError()
-	case f := <-ch:
+	case f, ok := <-ch:
+		if !ok {
+			// shutdown closed our pending channel; this select can win the race
+			// against <-e.closed and must not hand back a zero frame as success.
+			return proto.Frame{}, e.closedError()
+		}
 		if f.Type == proto.TypeErr {
 			var er proto.ErrResp
 			_ = proto.Unmarshal(f.Body, &er)

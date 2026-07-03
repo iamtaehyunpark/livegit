@@ -93,10 +93,15 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   widget / bash DEBUG trap (`internal/shell/integration.go`) do the rewrite; the list
   is baked into the generated hook at `lg shell` start.
 - `lg connect` — authenticate to Source **once** (handles Duo/2FA), then reuse
-  the cached ssh connection for `source.control_persist` (default 8h). `lg <cmd>`
-  and `lg shell` auto-run this on a terminal; run it by hand to pre-authenticate
-  before a scripted/agent-driven run that can't answer a Duo prompt. `--check`
-  reports liveness; `--stop` closes it. No-op for native/password auth.
+  the cached ssh connection for `source.control_persist` (default 8h; `max` = no
+  expiry, lives until the link drops — what `lg init` picks for 2FA hosts).
+  On a password host the stored password is **auto-filled** via SSH_ASKPASS
+  (hidden `lg askpass` helper + shim at `.lg/run/askpass.sh`); only the Duo
+  approval is left. Also verifies/upgrades the remote agent after connecting.
+  `lg <cmd>` and `lg shell` auto-run this on a terminal; run it by hand to
+  pre-authenticate before a scripted/agent-driven run that can't answer a Duo
+  prompt. `--check` reports liveness; `--stop` closes it. In native mode it's a
+  credential test (detects a Duo host and prints how to switch to system mode).
 - `lg scan [root]` — machine-wide view: walk the filesystem (default `$HOME`,
   depth-capped, skipping dotdirs/`node_modules`/`~/Library`) for every
   `.lg/config.yaml` and print each project's host, mode, and connection state
@@ -165,7 +170,11 @@ out-of-band — it manages its own (`internal/transport/controlmaster.go`):
   every lg project pointing at the same Source** — one Duo, many projects).
 - `lg connect` opens it **interactively** (terminal attached → Duo prompt visible)
   via `ssh -o ControlMaster=auto <masterOpts> <target> true`; ControlPersist
-  (`source.control_persist`, default 8h) + `ServerAliveInterval` keep it alive.
+  (`source.control_persist`, default 8h; `max`/`forever`/`yes`/`0` → ssh's
+  `ControlPersist=yes`, no expiry) + `ServerAliveInterval` keep it alive. With
+  `auth: password` set, SSH_ASKPASS is forced so `lg askpass` answers the
+  password prompt from the encrypted store and relays Duo/host-key prompts to
+  /dev/tty — the user only approves Duo.
 - **Data connections** (`dialSystemSSH`) add `-o ControlMaster=auto -o BatchMode=yes`
   + the master opts: they multiplex over the live socket, or **fail fast** if it's
   down (BatchMode never prompts → no hang on a Duo host with nowhere to render it).
@@ -181,24 +190,31 @@ out-of-band — it manages its own (`internal/transport/controlmaster.go`):
 
 ### Password auth + agent auto-deploy
 
-`source.auth: password` (forces native mode) uses a password stored **encrypted**
-at `<project>/.lg/credentials` (AES-GCM, key derived from the machine id via
+`source.auth: password` uses a password stored **encrypted** at
+`<project>/.lg/credentials` (AES-GCM, key derived from the machine id via
 `ioreg`/`/etc/machine-id` — copying the file to another machine won't decrypt;
-`internal/config/secret.go`). The system-`ssh` path can't answer a prompt from
-lg's non-interactive launch, so password hosts must use native. `authMethods`
-offers both `ssh.Password` and `ssh.KeyboardInteractive` (many servers deliver
-"password" as keyboard-interactive). `lg init --auth password` prompts (hidden,
-never in argv) and stores it.
+`internal/config/secret.go`). Password and 2FA are **independent** wizard
+questions (`lg init` flags: `--auth password`, `--two-factor`):
+- **password, no 2FA** → `ssh_mode: native`: the Go client answers the prompt
+  itself. `authMethods` offers `ssh.Password` + `ssh.KeyboardInteractive`, but
+  answers only password-*looking* questions (`PasswordLikeQuestion`; one-time
+  password/OTP prompts excluded) — a Duo challenge surfaces as `ErrSecondAuth`
+  with switch-to-system guidance instead of burning the attempt.
+- **password + 2FA** → `ssh_mode: system` + `control_persist: max`: `lg connect`
+  auto-fills the password into ssh via SSH_ASKPASS (see above); the user only
+  approves Duo, and the master then carries everything with no expiry.
 
-`lg init` also **confirms/deploys the agent**: `transport.EnsureAgent`
-(`internal/transport/deploy.go`) connects, checks for `lg` on the remote, and if
-missing pipes the matching embedded Linux binary to `~/.local/bin/lg` (no scp/
-sftp — streamed over an ssh session). The Linux agents are embedded via
-`internal/agentbin` (`//go:embed all:data`); `make agents` (run by `make build`)
-cross-compiles them from the same source, so the deployed agent always matches
-this build's protocol. Plain `go build`/`go test` embed nothing (data/ has only
-`.gitkeep`) → deploy degrades to printing a manual `scp` command. `agent_bin`
-stays `"lg"` (resolved by the PATH-prefix in `remoteAgentCmd`).
+`lg init` **and `lg connect`** confirm/deploy the agent: `transport.EnsureAgent`
+(`internal/transport/deploy.go`) connects, checks for `lg` on the remote, pipes
+the matching embedded Linux binary to `~/.local/bin/lg` if missing (no scp/
+sftp — streamed over an ssh session), and **re-uploads on a version mismatch**
+(versioned builds only; "dev" never forces an upgrade). The Linux agents are
+embedded via `internal/agentbin` (`//go:embed all:data`); `make agents` (run by
+`make build`) cross-compiles them from the same source, so the deployed agent
+always matches this build's protocol. Plain `go build`/`go test` embed nothing
+(data/ has only `.gitkeep`) → deploy degrades to printing a manual `scp`
+command. `agent_bin` stays `"lg"` (resolved by the PATH-prefix in
+`remoteAgentCmd`).
 
 ## Live test environment (already set up)
 

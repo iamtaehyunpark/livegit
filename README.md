@@ -246,9 +246,11 @@ Connecting to the server uses your existing SSH setup:
 - **`system` mode (default)** shells out to the real `ssh` binary, so your
   `~/.ssh/config` fully applies — `Host` aliases, `ProxyJump`/bastions,
   `ControlMaster` (2FA/Duo isn't re-prompted), `IdentityFile`, `known_hosts`.
-  This is what makes lab and 2FA servers just work.
+  This is what makes lab and 2FA servers just work: authenticate once with
+  `lg connect` (a stored password is auto-filled — you only approve the Duo
+  push) and the cached connection carries every later command.
 - **`native` mode** uses a built-in SSH client. Password auth (stored encrypted,
-  keyed to the machine) is also supported for hosts that need it.
+  keyed to the machine) logs in by itself on hosts without a second factor.
 
 Change a setting with `lg config set source.host gpu-2`, or edit the file with
 `lg config edit` (it's validated before saving).

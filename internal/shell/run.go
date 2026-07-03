@@ -38,6 +38,7 @@ func RunRemote(client *transport.Client, cmd, cwd string) (int, error) {
 	exitCode := 0
 	gotExit := false
 	exited := make(chan struct{})
+	var exitOnce sync.Once // handler frames dispatch concurrently; close exactly once
 	ctl := transport.NewEndpoint(ctlStream)
 	ctl.SetHandler(func(f proto.Frame) (proto.MsgType, any, bool, error) {
 		if f.Type == proto.TypeExecExit {
@@ -46,11 +47,7 @@ func RunRemote(client *transport.Client, cmd, cwd string) (int, error) {
 			exitMu.Lock()
 			exitCode, gotExit = ex.Code, true
 			exitMu.Unlock()
-			select {
-			case <-exited:
-			default:
-				close(exited)
-			}
+			exitOnce.Do(func() { close(exited) })
 		}
 		return 0, nil, false, nil
 	})

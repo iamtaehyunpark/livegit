@@ -49,34 +49,41 @@ type execSession struct {
 }
 
 // serveControl runs the framed control endpoint for one exec invocation.
+// The endpoint dispatches each inbound frame in its own goroutine, so the
+// token (written by ExecReq, read by Resize) and the session's pty handle
+// (written by serveData) must both be read under h.mu.
 func (h *execHub) serveControl(stream io.ReadWriteCloser) {
 	ep := transport.NewEndpoint(stream)
-	var token string
+	var token string // guarded by h.mu
 	ep.SetHandler(func(f proto.Frame) (proto.MsgType, any, bool, error) {
 		switch f.Type {
 		case proto.TypeExecReq:
 			var req proto.ExecReq
 			_ = proto.Unmarshal(f.Body, &req)
-			token = fmt.Sprintf("exec-%d-%d", os.Getpid(), h.seq.Add(1))
+			t := fmt.Sprintf("exec-%d-%d", os.Getpid(), h.seq.Add(1))
 			term := req.Term
 			if term == "" {
 				term = "xterm-256color"
 			}
 			h.mu.Lock()
-			h.wait[token] = &execSession{
-				token: token, cmd: req.Cmd, cwd: req.Cwd,
+			token = t
+			h.wait[t] = &execSession{
+				token: t, cmd: req.Cmd, cwd: req.Cwd,
 				cols: req.Cols, rows: req.Rows, term: term, ctl: ep,
 			}
 			h.mu.Unlock()
-			return proto.TypeExecResp, proto.ExecResp{Token: token}, true, nil
+			return proto.TypeExecResp, proto.ExecResp{Token: t}, true, nil
 		case proto.TypeResize:
 			var rz proto.Resize
 			_ = proto.Unmarshal(f.Body, &rz)
 			h.mu.Lock()
-			s := h.wait[token]
+			var pt *os.File
+			if s := h.wait[token]; s != nil {
+				pt = s.pt
+			}
 			h.mu.Unlock()
-			if s != nil && s.pt != nil {
-				_ = pty.Setsize(s.pt, &pty.Winsize{Cols: rz.Cols, Rows: rz.Rows})
+			if pt != nil {
+				_ = pty.Setsize(pt, &pty.Winsize{Cols: rz.Cols, Rows: rz.Rows})
 			}
 			return 0, nil, false, nil
 		default:

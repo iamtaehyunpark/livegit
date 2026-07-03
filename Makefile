@@ -95,8 +95,11 @@ publish:
 	@test -n "$(TAG)" || { echo "usage: make publish TAG=vX.Y.Z"; exit 1; }
 	@./scripts/publish-release.sh "$(TAG)"
 
-## release: cross-compile static binaries for all platforms into ./dist
-release:
+## release: cross-compile static binaries for all platforms into ./dist.
+## Depends on `agents` so the embedded Linux agents are rebuilt at THIS version —
+## a stale agent in $(AGENTDIR) would fail EnsureAgent's version check on every
+## `lg connect` and re-upload endlessly. `docs` keeps the embedded guides fresh.
+release: agents docs
 	@mkdir -p dist
 	@for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; \

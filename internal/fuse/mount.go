@@ -29,6 +29,15 @@ func NewMount(mountpoint string, b *Backend) (*Mount, error) {
 	}
 	root := &lgNode{b: b, rel: ""}
 	opts := &fs.Options{}
+	// Let the kernel cache lookups/attrs briefly. Without these every path
+	// component of every syscall round-trips into this process; all answers come
+	// from the in-memory index anyway, and Source-side changes already arrive
+	// asynchronously (watcher push), so ≤1s of kernel-side staleness changes
+	// nothing observable while making ls/git/tab-completion far cheaper.
+	second := time.Second
+	opts.AttrTimeout = &second
+	opts.EntryTimeout = &second
+	opts.NegativeTimeout = &second
 	opts.MountOptions.FsName = "lg"
 	opts.MountOptions.Name = "livegit"
 	opts.MountOptions.AllowOther = false

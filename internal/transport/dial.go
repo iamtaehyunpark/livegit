@@ -132,8 +132,12 @@ func dialNativeSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 	// lg log file, NOT the user's terminal — otherwise it pollutes the output of
 	// every `lg <cmd>` (and tempts a `| grep` filter that would mask exit codes).
 	// This matches dialSystemSSH. Diagnostics are still in ~/.lg/lg.log.
+	// The handle must be closed with the connection: the reconnect supervisor
+	// dials forever, so an unclosed log file here leaks one fd per attempt.
+	var logFile *os.File
 	if lf, ferr := os.OpenFile(config.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
 		session.Stderr = lf
+		logFile = lf
 	} else {
 		session.Stderr = os.Stderr
 	}
@@ -142,12 +146,18 @@ func dialNativeSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 	if err := session.Start(cmd); err != nil {
 		_ = session.Close()
 		_ = client.Close()
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		return nil, fmt.Errorf("start remote agent: %w", err)
 	}
 	return &sshConn{
 		pipe: &rwc{r: stdout, w: stdin, c: nil},
 		closer: func() error {
 			_ = session.Close()
+			if logFile != nil {
+				_ = logFile.Close()
+			}
 			return client.Close()
 		},
 	}, nil
@@ -190,12 +200,19 @@ func dialSystemSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 	// Route ssh's own stderr (connection errors, occasional prompts) to the lg
 	// log file rather than the terminal, so failures don't spam the shell. With
 	// a ControlMaster already established (the common setup), no prompt occurs.
+	// Closed with the connection — the reconnect supervisor dials forever, so an
+	// unclosed handle here leaks one fd per attempt.
+	var logFile *os.File
 	if lf, ferr := os.OpenFile(config.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); ferr == nil {
 		cmd.Stderr = lf
+		logFile = lf
 	} else {
 		cmd.Stderr = os.Stderr
 	}
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		return nil, fmt.Errorf("spawn ssh: %w", err)
 	}
 	return &sshConn{
@@ -205,6 +222,9 @@ func dialSystemSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 				_ = cmd.Process.Kill()
 			}
 			_ = cmd.Wait()
+			if logFile != nil {
+				_ = logFile.Close()
+			}
 			return nil
 		},
 	}, nil
