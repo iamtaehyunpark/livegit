@@ -115,7 +115,12 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
 - `lg init` — interactive setup wizard (flags also work; `-i` forces wizard).
 - `lg config get|set|edit|show|path` — change settings safely (validates before save).
 - `lg shell` — mount the full-tree FUSE folder + run the user's shell (toggle hooks).
-- `lg unmount` — clear a leftover/stale FUSE mount.
+- `lg mount` — the headless sibling: mount without a shell, held by a detached
+  background process (`lg mount --foreground`, hidden) until `lg unmount`.
+  Idempotent; fails fast with "run `lg connect`" when the connection needs a
+  human. This is how scripts/agents get the mount (`lg shell` needs a tty).
+- `lg unmount` — stop the mount (idempotent: "nothing mounted" is success; also
+  clears a leftover/stale mount).
 - `lg status` — connection, toggle on/off, tree-sync freshness, cache, pending writes.
 - `lg serve --remote-root <p> [--ignore <csv>]` — Source agent (hidden; launched over ssh).
 
@@ -290,11 +295,17 @@ stream, and the client keeps it open until it sees `ExecExit`. Fix: drive the
 exit off the **output/process** side (`cmd.Wait` after the pty EOFs), never the
 stdin side. See `internal/agent/exec.go` `serveData`.
 
-### How to drive `lg shell` head-less (the test harness)
+### How to test the mount head-less
 
-`lg shell` is interactive (mounts FUSE + execs a shell), but the **mount is a
-real filesystem** — so the simplest test is: start `lg shell` in a tmux pane,
-then verify the mount from a *separate* process (`ls`/`cat` the mountpoint
+**Preferred: `lg mount`** — headless by design, no tmux needed:
+`lg mount` (waits until browsable) → `ls`/`cat` the mountpoint → `lg unmount`
+(the background holder exits by itself). Offline it still mounts from the
+tree.json snapshot via `lg mount --foreground &` (the launcher itself refuses
+when not connected — that fail-fast is intended agent behavior).
+
+The tmux recipe below remains for testing `lg shell` ITSELF (its child-shell
+integration, toggle hooks, exit path): start `lg shell` in a tmux pane, then
+verify the mount from a *separate* process (`ls`/`cat` the mountpoint
 directly). No need to send keys into the lg shell at all.
 
 ```sh

@@ -1,233 +1,241 @@
 # Using `lg` as an agent — operating guide
 
-You are an AI coding agent working in a shell. `lg` (Live Git) lets you run
-commands and work with code **on a remote server** (a GPU box / lab machine)
-from this local machine, over one invisible, always-authenticated connection.
-This guide is a harness: follow it and you can drive `lg` as if the remote
-server were local — flawlessly, non-interactively.
+`lg` (Live Git) bolts a remote server — a GPU box, a lab machine — onto this
+laptop **as if the two were one device**. The server's repo is simultaneously:
 
-Read this whole file once. It is self-contained.
+- a place you can **run things**: `lg <command>` executes on the server, in the
+  right directory, streaming live, with real exit codes — ssh without the
+  ceremony;
+- a folder you can **touch**: `lg mount` makes the entire remote tree a normal
+  local directory — browse it, grep it, edit it with your native file tools,
+  and every change syncs both ways automatically;
+- a machine that **keeps working when you leave**: `lg run -d` launches jobs
+  that outlive your session, with `lg jobs` / `lg logs -f` to manage them.
+
+Treat it the way you treat git: a tool you've known for years. One cached,
+authenticated connection carries everything; you never think about ssh again.
+This file is self-contained — read it once and you know the whole surface.
 
 ---
 
-## The three golden rules
+## Choosing the right tool (the decision that matters)
 
-1. **Run remote commands with `lg <command>`** (or `lg run -- <command>`). That's
-   the primitive for everything you'd do on the server: run code, tests, git,
-   read/list/search files, inspect the environment.
-2. **NEVER run `lg shell`, `lg toggle`, or `lg vim`/`lg htop`/other full-screen
-   or interactive programs.** `lg shell` starts an interactive shell and will
-   **hang you forever**. Interactive TUIs need a human. Use non-interactive
-   commands only (`lg cat`, `lg run -- sed -n …`, `lg python script.py`).
-3. **You must be inside an lg project.** Commands work from the project directory
-   or any subdirectory (config is discovered by walking up to the nearest
-   `.lg/`, like git's `.git/`). If you're outside one, `lg` errors "not an lg
-   project" — `cd` into the project first.
+| You want to… | Use | Why |
+|---|---|---|
+| Run/build/test something on the server | `lg <cmd>` / `lg run -- <cmd>` | One round trip, live stream, real exit code. |
+| Check the environment (GPU, disk, processes) | `lg nvidia-smi`, `lg df -h`, … | Same. |
+| Read one file / quick search | `lg run -- cat/grep/sed …` | Cheaper than mounting for a one-off. |
+| **Explore or edit code seriously** (multi-file reads, refactors, reviews) | **`lg mount`, then your native Read/Edit/Write/Grep tools on the mount** | The whole tree becomes local files — your best tools work at full power; edits sync back in milliseconds. |
+| Start a long training run / anything that must survive disconnects | `lg run -d -- <cmd>` → `lg logs -f <id>` | Detached job on the server; your session (and laptop) can die. |
+| Watch a running job | `lg logs -f <id>` (Ctrl-C stops *following*, never the job) | |
+| Check project/connection health | `lg status`, `lg connect --check` | Both safe, read-only. |
+| Recover / reset the link | `lg disconnect`, then human runs `lg connect` | See [Authentication](#authentication--whats-yours-whats-human). |
 
-Output is clean (remote diagnostics go to a log file, not your terminal) and
-**exit codes propagate**, so `lg <cmd>` composes in scripts exactly like a local
-command.
+Rule of thumb: **one command → `lg run`; real work in the codebase → mount it.**
+Mixing is normal: mount for editing while firing `lg run -- pytest` for
+execution — lg guarantees your just-saved edits reach the server before the
+command runs (a built-in flush barrier).
 
 ---
 
 ## Step 0 — Orient yourself
 
-Before doing anything, confirm the project and connection:
-
 ```sh
-cd <project-dir>          # a dir that contains .lg/ (or is under one)
-lg status                 # role, mount path, connection, tree freshness
-lg config get source.remote_root    # absolute repo path on the server
-lg config get local_root            # the local mount folder (named after the repo)
+cd <project-dir>       # any dir at/under one containing .lg/ (like .git/)
+lg status              # mount live? connection up? tree synced? pending writes?
 ```
 
-If `lg status` / any `lg <cmd>` prints `not an lg project`, you are in the wrong
-directory — find the project (look for a `.lg/` dir) and `cd` there. `lg scan`
-lists every lg project on the machine and its connection state, which is a quick
-way to locate one. If a command prints `not connected …`, see
-[Failures](#failures--diagnosis--fix).
+- `not an lg project` → wrong directory. `lg scan` lists every lg project on
+  this machine with its connection state; `cd` into one.
+- `connection: down — run 'lg connect'` → see
+  [Authentication](#authentication--whats-yours-whats-human).
 
 A project looks like:
+
 ```
 <project>/
-  .lg/              config + state  (config.yaml, lg.log, tree.json, cache/)
-  <repo-name>/      the mount folder (local_root) — only populated while a
-                    human runs `lg shell`; usually EMPTY for you.
+  .lg/            config + state (config.yaml, lg.log, tree.json, cache/)
+  <repo-name>/    the mount point (local_root) — the server's tree appears
+                  here while mounted; empty otherwise
 ```
+
+`lg config get source.remote_root` / `lg config get local_root` print the two
+sides of the mapping.
 
 ---
 
-## Running commands on the server
+## Running commands (ssh, minus the ssh)
 
 ```sh
-lg <command> [args...]        # bare form — first word must not be an lg subcommand
-lg run -- <command> [args...] # explicit form — always safe, no ambiguity
+lg <command> [args…]           # bare form — any first word that isn't an lg subcommand
+lg run -- <command> [args…]    # explicit form — never ambiguous; prefer in scripts
 ```
 
-Prefer `lg run -- <command>` in scripts: it never collides with lg's own
-subcommands (`status`, `config`, `run`, `init`, `shell`, `toggle`, `local`,
-`unmount`, `help`, `completion`). Use bare `lg <cmd>` only for clearly-not-a-
-subcommand programs (`lg pytest`, `lg python …`, `lg nvidia-smi`).
-
-**Examples:**
 ```sh
-lg run -- pwd
-lg run -- ls -la src/
 lg run -- python -c 'import torch; print(torch.cuda.is_available())'
-lg run -- pytest -q
+lg run -- pytest -q ; echo "exit: $?"        # exit codes propagate unchanged
 lg run -- git status
-lg run -- nvidia-smi
+lg nvidia-smi
 ```
 
-**Exit codes** come back unchanged:
-```sh
-lg run -- pytest -q ; echo "tests exit: $?"
-lg run -- test -f config.yaml && echo "exists on server"
-```
-Do NOT pipe `lg`'s output through a filter and then read `$?` — `$?` would be the
-filter's exit code, not the remote command's. If you must pipe, use
-`${PIPESTATUS[0]}` (bash) to get lg's code.
+Mechanics worth knowing:
 
-**Long-running commands** stream live. Give your shell tool a large timeout for
-training/downloads; interrupting your local `lg` sends the interrupt to the
-remote process too (like ssh).
-
-**Quoting:** everything after `lg run --` is reassembled into one command line
-and run by a login shell (`sh -lc`) on the server, so remote globs/redirects/env
-work. Quote for YOUR local shell as usual; use single quotes to keep the remote
-shell from expanding things locally:
-```sh
-lg run -- bash -c 'cd subdir && for f in *.py; do wc -l "$f"; done'
-```
+- **Directory mapping.** The command runs in the server directory matching your
+  local cwd: at the project root or above → `remote_root`; inside the mount at
+  `<repo>/src/models` → `remote_root/src/models`. Simplest habit: stay at the
+  project root and pass repo-relative paths.
+- **Quoting.** Everything after `--` is reassembled and run by a login shell
+  (`sh -lc`) on the server, so remote globs/redirects/`$VARS` work — protect
+  them from *your* shell with single quotes:
+  `lg run -- bash -c 'for f in *.py; do wc -l "$f"; done'`
+- **Exit codes.** `$?` is the remote command's code. Don't pipe `lg`'s output
+  and then read `$?` (that's the filter's code) — use `${PIPESTATUS[0]}` or
+  capture first: `out=$(lg run -- …)`.
+- **Streaming & interrupts.** Output streams live (it's a real PTY). Give long
+  commands a generous tool timeout; interrupting `lg` interrupts the remote
+  process, exactly like ssh.
+- **Edit-then-run is ordered.** `lg run` waits (up to 10s) for any unflushed
+  mount edits under your cwd to land on the server first. Save, run, trust it.
+- **Interactive programs** (`vim`, `htop`, REPLs, `watch`) run fine but expect
+  a responding terminal — under an agent's non-interactive shell they'll sit
+  waiting forever. Use their non-interactive forms (`sed`/`ls`/`nvidia-smi`;
+  `python script.py` over a REPL), or edit through the mount instead of remote
+  vim. If you genuinely control a terminal (e.g. a tmux pane you can send keys
+  to), nothing stops you from running them there.
 
 ---
 
-## Directory mapping (important)
+## The mount — the server's tree as local files
 
-The command runs in the **server directory that corresponds to your current
-local directory**, relative to the mount root (`local_root` → `remote_root`):
-
-| Your local cwd | Runs on server in |
-|---|---|
-| `<project>/` (at/above the mount) | `<remote_root>` (repo root) |
-| `<project>/<repo>/` (mount root) | `<remote_root>` |
-| `<project>/<repo>/src/models` | `<remote_root>/src/models` |
-
-So to run something in a specific server subdirectory, either `cd` into the
-matching local path first, or just pass the path in the command
-(`lg run -- ls src/models`). When in doubt, pass explicit paths relative to the
-repo root and stay at the project root.
-
----
-
-## Reading & searching server files
-
-Without a mount (your normal situation), use commands:
+This is lg's superpower, and it is fully yours to use:
 
 ```sh
-lg run -- cat path/to/file.py                 # whole file
-lg run -- sed -n '1,80p' path/to/file.py      # a line range
-lg run -- wc -l path/to/file.py
-lg run -- ls -la path/to/dir
-lg run -- grep -rn "def train" .              # search (or: rg if installed)
-lg run -- find . -name '*.yaml' -not -path './.venv/*'
+lg mount        # headless: mounts <project>/<repo-name>/, returns immediately
+                # (idempotent — safe to run when already mounted)
+…work…          # your native file tools, on real paths
+lg unmount      # done (also fine to leave mounted for the next task)
 ```
 
-Capture output the normal way (`out=$(lg run -- cat file)`).
+While mounted:
 
----
+- **The whole tree is browsable instantly** — names, sizes, structure at every
+  depth (metadata syncs eagerly; file *content* downloads on first open, so
+  don't cat a 5 GB checkpoint without meaning it).
+- **Your edits sync to the server automatically** within milliseconds
+  (journaled write-through; `lg status` shows anything still pending). Create,
+  rename, delete — git-style atomic saves all work.
+- **Server-side changes appear locally** within ~a second (a watcher pushes
+  invalidations; your next read refetches).
+- **Verify like a skeptic if you like**: `lg run -- sha256sum path` vs a local
+  hash — but the flush barrier already makes save→run safe.
 
-## Editing / creating server files
+When to mount vs not: mounting costs one command and gives your file tools
+native, full-speed access — reach for it whenever a task touches more than a
+file or two. For a single read or a log grep, `lg run -- cat/grep` is leaner.
 
-### If a mount is available (best — check `local_root` is non-empty)
-A human may have `lg shell` running; then `<project>/<repo>/` is a live folder.
-Test it: `ls "$(lg config get local_root)"` — if it shows the repo tree, use your
-**native file tools (Read / Edit / Write / Grep / Glob)** directly on paths under
-`local_root`. Edits sync to the server automatically. This is the "native" path.
+Practical notes:
 
-### If there is no mount (default) — write whole files over `lg`
-Base64-encode the full new content and decode it on the server in one command
-(no stdin, no heredoc — robust for any content, verified):
+- `lg mount` needs the connection up; if it isn't, it fails fast with
+  `run 'lg connect'` — that's a [human step](#authentication--whats-yours-whats-human)
+  on 2FA hosts.
+- `lg shell` is the interactive sibling (mount + a human's shell with extras
+  like per-tab toggle mode). It expects a terminal; as an agent you get
+  everything you need from `lg mount` — but if you're driving a real terminal
+  (tmux), `lg shell` works there too. If a mount is already live (yours or a
+  human's `lg shell`), just use it; lg refuses double mounts with a clear
+  message.
+- Don't create files under `local_root` while it's **not** mounted — they'd be
+  real local files that a later mount hides.
+
+### Editing without a mount (fallback)
+
+If you choose not to mount (single surgical edit), write whole files via a
+base64 argument — robust for any content, no stdin involved (the remote PTY
+doesn't signal EOF cleanly, so never pipe into `lg run`):
 
 ```sh
-# write NEW_CONTENT to <path> on the server (relative to your cwd mapping):
 B64=$(printf '%s' "$NEW_CONTENT" | base64)
 lg run -- bash -c "printf %s '$B64' | base64 -d > 'path/to/file'"
+lg run -- cat path/to/file    # verify
 ```
-
-For a surgical edit, read the file first (`lg run -- cat path`), apply your
-change locally to produce the full new content, then write it back with the
-pattern above. Verify with `lg run -- cat path` or a diff. (Do NOT try to pipe
-content into `lg run` via stdin — the remote PTY doesn't cleanly signal EOF and
-it can hang. Always pass content as a command argument, as above.)
-
-Create dirs / move / delete like any command: `lg run -- mkdir -p data/out`,
-`lg run -- rm -f tmp.txt`.
 
 ---
 
-## Setting up a project (only if there's no `.lg/` yet)
+## Fire-and-forget jobs (long runs that outlive you)
 
-Most of the time a project already exists. If you must create one, you need the
-server details. Prefer non-interactive flags. **Password auth requires an
-interactive prompt you cannot answer — a human must run that step** (or the host
-already uses an ssh key).
+Plain `lg run` ties the remote process to your invocation — Ctrl-C or a dropped
+session ends it. For anything long (training, sweeps, downloads):
 
 ```sh
-# key/agent auth (no password needed):
+lg run -d -- python train.py --epochs 100     # prints a job id, returns at once
+lg jobs                                       # id, state, mode, age, command
+lg logs <id>                                  # output so far
+lg logs -f <id>                               # follow live; Ctrl-C detaches, job keeps running
+lg jobs kill <id>                             # stop it
+lg jobs rm <id>                               # forget a finished job + its logs
+```
+
+Jobs run on the server under `systemd --user`, so they survive your disconnect,
+your laptop sleeping, even the connection window expiring. (Where systemd isn't
+available lg falls back to `nohup` and *tells you* durability needs
+`loginctl enable-linger` — surface that warning to the human.) Exit codes are
+recorded: `lg jobs` shows `done(0)` / `done(1)`.
+
+Pattern for an agent: start the job detached, poll `lg jobs` / tail
+`lg logs <id>` between other work, report the exit code when it lands.
+
+---
+
+## Authentication — what's yours, what's human
+
+lg authenticates **once**, caches the connection (hours; `lg status` shows it),
+and every command reuses it. Your normal state is "it just works."
+
+- **Safe for you, always:** every `lg <cmd>`, `lg status`, `lg connect --check`,
+  `lg disconnect`, `lg mount`/`lg unmount` (they fail fast rather than prompt).
+- **Human steps:** anything that can pop an interactive prompt you cannot
+  answer — a Duo push lands on a *phone*. That's `lg connect` and `lg refresh`
+  on 2FA hosts, and any password entry. When you hit
+  `not connected … run 'lg connect'`, ask the human to run `lg connect`; one
+  approval buys hours of your commands working. Check readiness anytime with
+  `lg connect --check`.
+- On hosts with stored-password auth (no 2FA), nothing is interactive — even
+  `lg connect` is just a credential test you may run freely.
+
+---
+
+## Setting up a project (only when there's no `.lg/` yet)
+
+```sh
 cd <new-project-dir>
 lg init --role ghost --host <ssh-host> --user <user> --remote-root <abs-repo-path> --yes
 ```
 
-`lg init` writes `.lg/config.yaml`, creates the mount folder (named after the
-repo), and **auto-installs the `lg` agent on the server** if it's missing.
-- If it prints `✓ deployed agent …` or `agent already installed`, you're ready.
-- If it needs a password (`--auth password`), **stop and ask the human** to run
-  `lg init … --auth password` (it prompts hidden and stores the secret
-  encrypted). You cannot supply the password yourself.
-
-Change settings later: `lg config set <key> <value>` (e.g.
-`lg config set source.remote_root /new/path`); lists via `lg config edit`.
+That writes `.lg/config.yaml`, creates the mount point (named after the repo),
+auto-installs the `lg` agent on the server, and drops this guide + GUIDE.md.
+Password (`--auth password`) or 2FA (`--two-factor`) setups involve prompts —
+hand those to the human. Settings change safely later via
+`lg config set <key> <value>`.
 
 ---
 
 ## Failures → diagnosis → fix
 
-| Symptom | Meaning | What to do |
+| Symptom | Meaning | Fix |
 |---|---|---|
-| `not an lg project — run 'lg init'` | Your cwd isn't under a `.lg/`. | `cd` into the project (find the dir with `.lg/`). Don't `lg init` unless you're sure there's no project. |
-| `lg: not connected to <host> …` | Couldn't reach/authenticate the server, or the agent is missing. | Read `<project>/.lg/lg.log` (last lines). Common causes below. |
-| `lg: not connected … run \`lg connect\`` | The server needs interactive 2FA/Duo authentication you can't answer. | **A human step** — ask the human to run `lg connect` and approve the Duo prompt. It caches the connection for hours; then your `lg <cmd>`s work. Check readiness with `lg connect --check` (safe, read-only). Do NOT run bare `lg connect` yourself — it may block on a prompt you can't answer. |
-| `… interactive second authentication step (Duo/2FA)` | The project is in native/password mode but the host demands a Duo/OTP answer stored credentials can't give. | Run the two printed commands: `lg config set source.ssh_mode system`, then ask the human to run `lg connect` (the stored password is auto-filled; they only approve Duo once, cached for hours). |
-| log shows `lg: command not found` | Agent not installed on the server. | A human runs `lg init` again (it re-deploys), or deploy manually. |
-| log shows `Permission denied` / auth failure | Key not accepted / password needed / wrong user. | Human sets up key or re-runs `lg init --auth password`. |
-| `Permission denied` writing a file (remote) | Server-side Unix perms — repo owned by another user. | Not an lg problem. Report it; the human fixes ownership/group or connects as the owner. |
-| A command hangs and never returns | You ran an interactive/TUI program (`lg shell`, `lg vim`, a REPL). | Never do this. Kill it; use a non-interactive equivalent. |
-| Mount folder is empty | No `lg shell` is running (normal for you). | Use the execution-only file patterns above; don't rely on the mount. |
+| `not an lg project` | cwd isn't under a `.lg/`. | `lg scan` to find projects; `cd` there. Don't `lg init` over nothing unless you mean to create one. |
+| `not connected … run 'lg connect'` | No authenticated connection and lg can't prompt. | Human runs `lg connect` (Duo). Verify with `lg connect --check`. |
+| `… interactive second authentication step (Duo/2FA)` | Project is in native mode but the host wants Duo. | Run the two printed commands (`lg config set source.ssh_mode system`, human runs `lg connect`). |
+| `mount didn't come up — see …/lg.log` | FUSE couldn't start (macFUSE/libfuse missing?) or connection died mid-mount. | Read the log; report to the human if FUSE itself is absent. |
+| `already mounted — an lg shell or lg mount is active` | The tree is being served. | That's success — just use the mounted folder. |
+| ENXIO / "device not configured" touching the mount | Stale mount from a killed holder. | `lg unmount`, then remount. (`lg mount`/`lg shell` also auto-recover this.) |
+| A `lg run` command never returns | The remote program is waiting for interactive input. | Interrupt it; rerun non-interactively, or do the work through the mount. |
+| `flush barrier: timed out (continuing)` | A mount edit hadn't reached the server in 10s (offline?). | Check `lg status` (journal pending? connection?); rerun once it drains. |
+| log shows `lg: command not found` (remote) | Agent binary missing on the server. | `lg connect` (human, if 2FA) auto-deploys/upgrades it; or `lg init` again. |
+| `Permission denied` on a remote path | Server-side Unix perms. | Not an lg problem — report it. |
 
-`<project>/.lg/lg.log` is your primary diagnostic — read it whenever a connection
-fails. Find it via `lg config path` (config is next to the log).
-
----
-
-## Do / Don't
-
-**Do**
-- Use `lg run -- <cmd>` for everything on the server; trust exit codes.
-- Stay at the project root and pass repo-relative paths, or `cd` to map cwd.
-- Read `.lg/lg.log` when a connection fails.
-- Write files with the base64-argument pattern; verify with a read-back.
-- Use native file tools on `local_root` only after confirming the mount is live.
-
-**Don't**
-- Don't run `lg shell`, `lg toggle`, or any interactive/full-screen program.
-- Don't pipe `lg` output and then read `$?` (it masks the remote exit code).
-- Don't pipe content into `lg run` via stdin (PTY EOF can hang).
-- Don't run `lg init` blindly — check for an existing `.lg/` first.
-- Don't try to supply an ssh password yourself; that's a human step.
-- Don't run bare `lg connect` (or `lg refresh`) on a 2FA/Duo host — both may
-  block on a prompt you can't answer; ask the human. `lg connect --check` is
-  safe, and so is `lg disconnect`.
+`<project>/.lg/lg.log` is the primary diagnostic for anything
+connection-shaped. `lg config path` locates it.
 
 ---
 
@@ -235,25 +243,26 @@ fails. Find it via `lg config path` (config is next to the log).
 
 ```sh
 # orient
-cd <project> && lg status
+lg status ; lg scan
 lg config get source.remote_root ; lg config get local_root
 
-# run
-lg run -- <cmd>                         # exit code propagates; output is clean
-out=$(lg run -- cat path/file)          # read
-lg run -- grep -rn PATTERN .            # search
-lg run -- mkdir -p dir                  # fs ops
+# run (ssh, minus the ssh)
+lg run -- <cmd>                    # exit code propagates; streams live
+out=$(lg run -- cat path/file)     # capture
+lg run -- grep -rn PATTERN .       # search without mounting
 
-# write a whole file (no mount)
-B64=$(printf '%s' "$CONTENT" | base64)
-lg run -- bash -c "printf %s '$B64' | base64 -d > 'path'"
+# real work in the codebase
+lg mount                           # tree appears at local_root — use native tools
+lg unmount                         # when done (leaving it mounted is fine too)
 
-# setup (key auth only; password is a human step)
-lg init --role ghost --host H --user U --remote-root /abs/repo --yes
+# long jobs
+lg run -d -- <cmd>  →  lg jobs / lg logs -f <id> / lg jobs kill <id>
 
-# NEVER: lg shell | lg toggle | lg vim | lg <repl>   (interactive → hang)
+# connection (safe: status/--check/disconnect; Duo prompts are human steps)
+lg connect --check ; lg disconnect
 ```
 
-One line to remember: **`lg run -- <anything>` runs it on the server, in the
-directory matching your cwd, with real exit codes and clean output — that alone
-is enough to do remote development.**
+**The philosophy in one line: the GPU box is bolted onto this laptop. Run
+things with `lg <cmd>` as if the server were a faster core; touch its files
+via `lg mount` as if its disk were yours; leave long jobs behind with
+`lg run -d` as if it kept working after you closed the lid — because it does.**

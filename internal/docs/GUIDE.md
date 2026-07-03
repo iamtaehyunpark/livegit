@@ -73,7 +73,7 @@ Result:
 ```
 ~/myproject/
   .lg/         config + local state (like .git/)
-  myrepo/      ← the server's repo appears here (empty until you run `lg shell`)
+  myrepo/      ← the server's repo appears here (empty until `lg shell`/`lg mount`)
 ```
 
 ---
@@ -120,6 +120,19 @@ normal shell. Now:
 - Edit and save — it syncs up to the server automatically. No manual sync.
 - Type `exit` to unmount and disconnect cleanly.
 
+**Don't want a new shell? `lg mount`** gives you the same folder without one:
+
+```sh
+lg mount        # mounts ~/myproject/myrepo/ and returns; browse/edit freely
+lg unmount      # stop it when you're done (leaving it mounted is fine too)
+```
+
+The mount is held by a small background process, so it survives closing the
+terminal that started it. This is also the form scripts and coding agents use —
+it never prompts (if the connection needs a login it says "run `lg connect`"
+instead of hanging). What you give up versus `lg shell`: the auto-remote read
+commands and toggle mode below, which live in the shell integration.
+
 Inside `lg shell`, common read commands (`ls`, `cat`, `tree`, `grep`, `find`,
 `head`, `tail`, …) automatically run **on the server** when you're inside the
 mounted folder, so they reflect the real server tree fast. Everything else runs
@@ -160,10 +173,11 @@ command over it, so there's no per-command login.
   lg disconnect         # close it (the next command re-authenticates)
   ```
 
-  You rarely run `lg connect` by hand: on a terminal, `lg <cmd>` and `lg shell`
-  bring the connection up for you (you'll just see the Duo prompt inline the
-  first time). Run it explicitly to pre-authenticate — e.g. before a scripted
-  run, or so a tool that can't answer a Duo prompt finds the connection ready.
+  You rarely run `lg connect` by hand: on a terminal, `lg <cmd>`, `lg shell`,
+  and `lg mount` bring the connection up for you (you'll just see the Duo
+  prompt inline the first time). Run it explicitly to pre-authenticate — e.g.
+  before a scripted run, or so a tool that can't answer a Duo prompt finds the
+  connection ready.
 - **Password (no second factor):** for hosts that only take a password and
   where you can't use a key. `lg init` (or `--auth password`) prompts once and
   stores the password **encrypted** at `<project>/.lg/credentials` (AES-GCM,
@@ -195,6 +209,7 @@ window on demand.
 | `lg <cmd>` | Run `<cmd>` on the server (streamed, exit code, PTY). |
 | `lg run -- <cmd>` | Same, explicit form (use when `<cmd>` clashes with a subcommand). |
 | `lg shell` | Mount the repo folder + start your shell. `exit` to leave. |
+| `lg mount` | Mount the repo folder **without** a shell (headless; for scripts/agents). `lg unmount` stops it. |
 | `lg connect` | Authenticate to the server once (handles Duo/2FA); reused for hours. `--check` / `--stop`. |
 | `lg refresh` | Re-authenticate now — restarts the cached window (e.g. before an overnight run). |
 | `lg disconnect` | Close the cached connection (next command re-authenticates). |
@@ -205,7 +220,7 @@ window on demand.
 | `lg config set <key> <val>` | Change a setting (e.g. `lg config set source.port 2222`). |
 | `lg config edit` | Open the config in `$EDITOR` (for list values like `ignore`). |
 | `lg config path` | Print the active config file path. |
-| `lg unmount` | Clear a stale/leftover mount (rarely needed). |
+| `lg unmount` | Stop a headless `lg mount` (or clear a stale/leftover mount). Idempotent. |
 | `lg init` | Set up (or re-set-up) the current directory. |
 
 ---
@@ -241,7 +256,8 @@ uses that one. Outside any project, `lg` says "not an lg project — run `lg ini
 | `not connected …` right after start | The agent likely isn't on the server, or auth failed. Re-run `lg init` (it re-deploys the agent); check `lg status`; look at `<project>/.lg/lg.log`. |
 | `not connected … run \`lg connect\`` (2FA/Duo host) | The cached connection expired or was never established — run `lg connect` and approve the prompt, then retry. `lg connect --check` shows the state. |
 | Mount is empty | The tree is still syncing (large repos take a few seconds — watch `lg.log` for `tree synced`), or you're not connected. |
-| `lg shell` won't stop / stale mount | `lg unmount`. `lg shell` also auto-recovers stale mounts on start. |
+| `lg shell` won't stop / stale mount | `lg unmount`. `lg shell` and `lg mount` also auto-recover stale mounts on start. |
+| "already mounted — an `lg shell` or `lg mount` is active" | The folder is already being served — just use it. To take it down first: `exit` that shell, or `lg unmount`. |
 | Permission denied writing files | Server-side: the repo may be owned by a different user. Fix ownership/group on the server, or connect as the owning account. |
 | "not an lg project" | You're outside a project directory — `cd` into one, or `lg init` here. |
 | Password moved to a new laptop | The encrypted store is machine-bound; re-run `lg init` to re-enter it. |
@@ -263,5 +279,6 @@ the single source of truth for content — think "iTerm2 + ssh, but invisible" p
 
 ---
 
-*Working with an AI coding agent? Point it at [`AGENTS.md`](AGENTS.md) — a
-prescriptive guide that lets an agent drive `lg` as a native remote-dev tool.*
+*Working with an AI coding agent? Point it at [`AGENTS.md`](AGENTS.md) — it
+teaches an agent to drive `lg` at full power: running commands, mounting the
+tree for native file edits, and leaving long jobs running detached.*

@@ -35,86 +35,13 @@ func runShell() error {
 	if err != nil {
 		return err
 	}
-	// Fallback for older configs without a mount point: a sibling of .lg/ named
-	// after the Source repo (basename of remote_root).
-	if c.LocalRoot == "" {
-		name := filepath.Base(strings.TrimRight(c.Source.RemoteRoot, "/"))
-		c.LocalRoot = filepath.Join(filepath.Dir(config.Dir()), name)
-	}
-
-	// On a Duo/2FA host, authenticate before mounting so the (single) prompt is
-	// clean and up front, not buried under FUSE/connection noise — and so the
-	// background dialer, which can't answer a prompt, finds a live connection.
-	// Best-effort: if it can't (e.g. no terminal), warn and continue; the shell
-	// still mounts and the supervisor will connect once `lg connect` succeeds.
-	if err := transport.EnsureMaster(c); err != nil {
-		if errors.Is(err, transport.ErrNeedConnect) {
-			fmt.Fprintf(os.Stderr, "lg: not connected to %s yet — run `lg connect` (handles Duo/2FA); the mount will link up once it succeeds.\n", c.Source.Host)
-		} else {
-			fmt.Fprintf(os.Stderr, "lg: couldn't connect to %s: %v (continuing; will retry)\n", c.Source.Host, err)
-		}
-	}
-
-	// A previous `lg shell` killed without unmounting leaves a stale FUSE mount
-	// here; reading anything under local_root would then fail with ENXIO. Clear
-	// it before we touch the path (e.g. to read .lgignore).
-	if recovered, rerr := fuse.RecoverStaleMount(c.LocalRoot); rerr != nil {
-		return fmt.Errorf("a stale mount at %s couldn't be cleared automatically.\n"+
-			"Run:  lg unmount   (or: umount -f %q)\nthen try again. (%v)",
-			c.LocalRoot, c.LocalRoot, rerr)
-	} else if recovered {
-		fmt.Fprintf(os.Stderr, "lg: cleaned up a stale mount at %s\n", c.LocalRoot)
-	}
-
-	// A LIVE mount that survived the stale check means another `lg shell` is
-	// already serving this project. Without this check the run continues into a
-	// bogus "directory is not empty" warning (IsNonEmptyDir reads the *mounted*
-	// tree) and then a confusing double-mount failure.
-	if fuse.IsMounted(c.LocalRoot) {
-		return fmt.Errorf("%s is already mounted — another `lg shell` for this project is running.\n"+
-			"Use that shell (or `exit` it first). If it's actually gone, run:  lg unmount", c.LocalRoot)
-	}
-
-	// Mounting over a populated directory hides those files while active. Warn
-	// loudly — local_root is meant to be an empty mount point.
-	if fuse.IsNonEmptyDir(c.LocalRoot) {
-		fmt.Fprintf(os.Stderr,
-			"lg: warning: %s is not empty — its files will be hidden while lg is mounted.\n"+
-				"     local_root should be an empty mount point. Change it with:\n"+
-				"       lg config set local_root ~/some-empty-dir\n",
-			c.LocalRoot)
-	}
-
-	matcher, err := buildMatcher(c)
+	_, cleanup, logPath, err := setupProjectMount(c)
 	if err != nil {
 		return err
-	}
-	journal, err := openGhostJournal()
-	if err != nil {
-		return err
-	}
-	defer journal.Close()
-
-	// Send background connection/health logs to a file, not the terminal.
-	logPath := routeLogsToFile(c)
-
-	// Long-lived connection + FUSE mount for this shell session.
-	client := newClient(c)
-	defer client.Close()
-	source := fuse.NewClientSource(client)
-	backend := fuse.NewBackend(c, journal, source, matcher)
-	client.OnInvalidate(backend.Invalidate)
-
-	mount, err := fuse.NewMount(c.LocalRoot, backend)
-	if err != nil {
-		return fmt.Errorf("mount failed: %w", err)
 	}
 	// Unmount on normal return AND on termination signals. When lg shell runs a
 	// child shell in a terminal, exiting can deliver SIGHUP/SIGTERM that would
-	// otherwise skip the defer and orphan the mount. unmountOnce guards against
-	// running it twice.
-	var unmountOnce sync.Once
-	cleanup := func() { unmountOnce.Do(func() { _ = mount.Unmount() }) }
+	// otherwise skip the defer and orphan the mount. cleanup is idempotent.
 	defer cleanup()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGTERM)
@@ -150,6 +77,98 @@ func runShell() error {
 
 	fmt.Fprintf(os.Stderr, "lg: type 'exit' to leave (unmounts and disconnects cleanly).\n")
 	return execUserShell(c, tabID)
+}
+
+// setupProjectMount brings up everything a live mount needs — connection
+// bootstrap, stale-mount recovery, double-mount guard, journal, client,
+// backend, and the FUSE mount itself. It is the shared core of `lg shell`
+// (which runs the user's shell on top) and `lg mount` (which just holds the
+// mount until unmounted). The returned cleanup is idempotent and safe to call
+// from a signal handler: unmount, then close the client and journal.
+func setupProjectMount(c *config.Config) (mount *fuse.Mount, cleanup func(), logPath string, err error) {
+	// Fallback for older configs without a mount point: a sibling of .lg/ named
+	// after the Source repo (basename of remote_root).
+	if c.LocalRoot == "" {
+		name := filepath.Base(strings.TrimRight(c.Source.RemoteRoot, "/"))
+		c.LocalRoot = filepath.Join(filepath.Dir(config.Dir()), name)
+	}
+
+	// On a Duo/2FA host, authenticate before mounting so the (single) prompt is
+	// clean and up front, not buried under FUSE/connection noise — and so the
+	// background dialer, which can't answer a prompt, finds a live connection.
+	// Best-effort: if it can't (e.g. no terminal), warn and continue; the mount
+	// still comes up and the supervisor connects once `lg connect` succeeds.
+	if err := transport.EnsureMaster(c); err != nil {
+		if errors.Is(err, transport.ErrNeedConnect) {
+			fmt.Fprintf(os.Stderr, "lg: not connected to %s yet — run `lg connect` (handles Duo/2FA); the mount will link up once it succeeds.\n", c.Source.Host)
+		} else {
+			fmt.Fprintf(os.Stderr, "lg: couldn't connect to %s: %v (continuing; will retry)\n", c.Source.Host, err)
+		}
+	}
+
+	// A previous mount holder killed without unmounting leaves a stale FUSE
+	// mount here; reading anything under local_root would then fail with ENXIO.
+	// Clear it before we touch the path (e.g. to read .lgignore).
+	if recovered, rerr := fuse.RecoverStaleMount(c.LocalRoot); rerr != nil {
+		return nil, nil, "", fmt.Errorf("a stale mount at %s couldn't be cleared automatically.\n"+
+			"Run:  lg unmount   (or: umount -f %q)\nthen try again. (%v)",
+			c.LocalRoot, c.LocalRoot, rerr)
+	} else if recovered {
+		fmt.Fprintf(os.Stderr, "lg: cleaned up a stale mount at %s\n", c.LocalRoot)
+	}
+
+	// A LIVE mount that survived the stale check means another `lg shell` or
+	// `lg mount` is already serving this project. Without this check the run
+	// continues into a bogus "directory is not empty" warning (IsNonEmptyDir
+	// reads the *mounted* tree) and then a confusing double-mount failure.
+	if fuse.IsMounted(c.LocalRoot) {
+		return nil, nil, "", fmt.Errorf("%s is already mounted — an `lg shell` or `lg mount` is active for this project.\n"+
+			"Use the live mount as-is, or close it first (`exit` that shell, or `lg unmount`).", c.LocalRoot)
+	}
+
+	// Mounting over a populated directory hides those files while active. Warn
+	// loudly — local_root is meant to be an empty mount point.
+	if fuse.IsNonEmptyDir(c.LocalRoot) {
+		fmt.Fprintf(os.Stderr,
+			"lg: warning: %s is not empty — its files will be hidden while lg is mounted.\n"+
+				"     local_root should be an empty mount point. Change it with:\n"+
+				"       lg config set local_root ~/some-empty-dir\n",
+			c.LocalRoot)
+	}
+
+	matcher, err := buildMatcher(c)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	journal, err := openGhostJournal()
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	// Send background connection/health logs to a file, not the terminal.
+	logPath = routeLogsToFile(c)
+
+	// Long-lived connection + FUSE mount.
+	client := newClient(c)
+	source := fuse.NewClientSource(client)
+	backend := fuse.NewBackend(c, journal, source, matcher)
+	client.OnInvalidate(backend.Invalidate)
+
+	mount, err = fuse.NewMount(c.LocalRoot, backend)
+	if err != nil {
+		_ = client.Close()
+		_ = journal.Close()
+		return nil, nil, "", fmt.Errorf("mount failed: %w", err)
+	}
+	var once sync.Once
+	cleanup = func() {
+		once.Do(func() {
+			_ = mount.Unmount()
+			_ = client.Close()
+			_ = journal.Close()
+		})
+	}
+	return mount, cleanup, logPath, nil
 }
 
 // execUserShell runs the user's real shell with lg integration injected via

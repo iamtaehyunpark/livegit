@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
+	"github.com/iamtaehyunpark/livegit/internal/fuse"
 	"github.com/iamtaehyunpark/livegit/internal/shell"
 	"github.com/iamtaehyunpark/livegit/internal/transport"
 	"github.com/spf13/cobra"
@@ -23,7 +24,11 @@ func newStatusCmd() *cobra.Command {
 			}
 			fmt.Printf("role:        %s\n", c.Role)
 			if c.Role == config.RoleGhost {
-				fmt.Printf("mount:       %s\n", c.LocalRoot)
+				if fuse.IsMounted(c.LocalRoot) {
+					fmt.Printf("mount:       %s (live — browse/edit it directly)\n", c.LocalRoot)
+				} else {
+					fmt.Printf("mount:       %s (not mounted — `lg mount` or `lg shell` to browse/edit)\n", c.LocalRoot)
+				}
 				fmt.Printf("source:      %s:%s\n", c.Source.Host, c.Source.RemoteRoot)
 
 				// ssh connection (Duo/2FA reuse) — system mode only; native mode
