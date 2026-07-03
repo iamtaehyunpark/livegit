@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
 	"golang.org/x/term"
@@ -36,9 +37,12 @@ const controlPathTemplate = "~/.ssh/lg-cm-%C"
 var ErrNeedConnect = errors.New("no ssh connection to Source; run `lg connect` to authenticate (handles Duo/2FA)")
 
 // usesControlMaster reports whether this config drives ssh through the system
-// binary — the only mode where multiplexing (and thus a master) applies.
+// binary — the only mode where multiplexing (and thus a master) applies. Note
+// that auth=password does NOT opt out by itself: password + ssh_mode=system is
+// the supported setup for a password+Duo host — `lg connect` shows ssh's own
+// password and Duo prompts once, and the master carries everything after.
 func usesControlMaster(cfg *config.Config) bool {
-	return cfg.Source.SSHMode != "native" && cfg.Source.Auth != "password"
+	return cfg.Source.SSHMode != "native"
 }
 
 // controlPathArgs binds an ssh invocation to lg's master socket (enough for
@@ -52,16 +56,27 @@ func controlPathArgs() []string {
 // client) and keepalives so an idle NAT/firewall doesn't silently kill it (and a
 // dead peer is reaped promptly instead of wedging reuse behind a stale socket).
 func masterOpts(cfg *config.Config) []string {
-	persist := cfg.Source.ControlPersist
-	if persist == "" {
-		persist = "8h"
-	}
 	args := controlPathArgs()
 	return append(args,
-		"-o", "ControlPersist="+persist,
+		"-o", "ControlPersist="+persistValue(cfg),
 		"-o", "ServerAliveInterval=60",
 		"-o", "ServerAliveCountMax=3",
 	)
+}
+
+// persistValue maps config.control_persist to ssh's ControlPersist value.
+// "max" (and the spellings users guess: forever/yes/0) means no timer at all —
+// the master lives until the connection actually drops (reboot, network death;
+// the keepalives above reap a dead peer). That's ssh's "yes". We write "max"
+// in config.yaml rather than "yes" because bare `yes` is a boolean to YAML.
+func persistValue(cfg *config.Config) string {
+	switch strings.ToLower(cfg.Source.ControlPersist) {
+	case "":
+		return "8h"
+	case "max", "forever", "yes", "0":
+		return "yes"
+	}
+	return cfg.Source.ControlPersist
 }
 
 // portArgs is the `-p <port>` pair (empty for the default port). Shared so the
@@ -105,6 +120,16 @@ func Connect(cfg *config.Config) error {
 	args = append(args, sshTargetOf(cfg), "true")
 	cmd := exec.Command("ssh", args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	// password + system mode (the password+Duo setup): auto-fill the stored
+	// password via SSH_ASKPASS so the user only answers the Duo step. Best
+	// effort — if the shim can't be set up, ssh just prompts on the tty.
+	if cfg.Source.Auth == "password" {
+		if env, err := askpassEnv(); err == nil {
+			cmd.Env = append(os.Environ(), env...)
+		} else {
+			fmt.Fprintf(os.Stderr, "lg: password auto-fill unavailable (%v); type it at the prompt.\n", err)
+		}
+	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("establish ssh connection: %w", err)
 	}
@@ -144,10 +169,12 @@ func StopMaster(cfg *config.Config) error {
 	return exec.Command("ssh", args...).Run()
 }
 
-// PersistLabel is the human-readable master lifetime for status/CLI messages.
+// PersistLabel is the human-readable master lifetime for status/CLI messages —
+// a phrase that completes "cached …": "for 8h", or for the no-timer setting,
+// "until the connection drops".
 func PersistLabel(cfg *config.Config) string {
-	if cfg.Source.ControlPersist != "" {
-		return cfg.Source.ControlPersist
+	if v := persistValue(cfg); v != "yes" {
+		return "for " + v
 	}
-	return "8h"
+	return "until the connection drops (no expiry)"
 }

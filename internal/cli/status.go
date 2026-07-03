@@ -26,14 +26,14 @@ func newStatusCmd() *cobra.Command {
 				fmt.Printf("mount:       %s\n", c.LocalRoot)
 				fmt.Printf("source:      %s:%s\n", c.Source.Host, c.Source.RemoteRoot)
 
-				// ssh connection (Duo/2FA reuse) — system mode only; native/password
-				// carry credentials on every connection, so there's no master.
-				if c.Source.SSHMode != "native" && c.Source.Auth != "password" {
-					if transport.MasterLive(c) {
-						fmt.Printf("connection:  live (cached %s; new commands won't re-prompt)\n", transport.PersistLabel(c))
-					} else {
-						fmt.Println("connection:  down — run `lg connect` to authenticate (handles Duo/2FA)")
-					}
+				// ssh connection (Duo/2FA reuse) — system mode only; native mode
+				// carries the stored credentials on every connection, no master.
+				if c.Source.SSHMode == "native" {
+					fmt.Println("connection:  per-command (native ssh; each command authenticates itself)")
+				} else if transport.MasterLive(c) {
+					fmt.Printf("connection:  live (cached %s; new commands won't re-prompt)\n", transport.PersistLabel(c))
+				} else {
+					fmt.Println("connection:  down — run `lg connect` to authenticate (handles Duo/2FA)")
 				}
 			}
 

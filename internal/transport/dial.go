@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -33,20 +34,29 @@ func (c *sshConn) Close() error {
 }
 
 // dialSSH dispatches to the configured transport. "system" (default) shells out
-// to the real `ssh` binary so ~/.ssh/config applies; the native Go ssh client is
-// used for "native" mode and always for password auth (the system `ssh` binary
-// can't answer a prompt from lg's non-interactive launch).
+// to the real `ssh` binary so ~/.ssh/config applies; "native" uses the built-in
+// Go ssh client with stored credentials. Password auth rides whichever mode the
+// config says: native answers prompts with the stored password itself, while
+// system mode relies on the master `lg connect` authenticated interactively
+// (the right setup when the host adds a Duo/2FA step on top of the password).
 func dialSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
-	if cfg.Source.SSHMode == "native" || cfg.Source.Auth == "password" {
+	if cfg.Source.SSHMode == "native" {
 		return dialNativeSSH(cfg, remoteBin)
 	}
 	return dialSystemSSH(cfg, remoteBin)
 }
 
+// ErrSecondAuth means the host asked an interactive question beyond the
+// password (a Duo/OTP/2FA challenge) that the native client can't answer with
+// stored credentials. Callers turn this into "switch to system mode + lg
+// connect" guidance.
+var ErrSecondAuth = errors.New("host requires an interactive second authentication step (Duo/2FA)")
+
 // nativeClient builds and connects the built-in Go ssh client (ignores
 // ~/.ssh/config). Shared by the streaming dial and the init-time agent deploy.
 func nativeClient(cfg *config.Config) (*ssh.Client, error) {
-	auths, err := authMethods(cfg)
+	var secondAuthQ string
+	auths, err := authMethods(cfg, &secondAuthQ)
 	if err != nil {
 		return nil, err
 	}
@@ -71,9 +81,28 @@ func nativeClient(cfg *config.Config) (*ssh.Client, error) {
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", cfg.Source.Port))
 	client, err := ssh.Dial("tcp", addr, clientCfg)
 	if err != nil {
+		if secondAuthQ != "" {
+			// The auth failed *because* the host asked something we can't answer
+			// non-interactively (e.g. a Duo passcode prompt). Name the question and
+			// return the sentinel so callers print switch-to-system-mode guidance.
+			return nil, fmt.Errorf("%w — the host asked %q; switch this project to the cached interactive login:\n"+
+				"    lg config set source.ssh_mode system\n"+
+				"    lg connect   (a stored password is auto-filled; answer the Duo prompt once, reused for hours)", ErrSecondAuth, secondAuthQ)
+		}
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
 	return client, nil
+}
+
+// VerifyNative makes one throwaway native connection to Source to test the
+// stored credentials, returning ErrSecondAuth (wrapped) if the host demands an
+// interactive 2FA step. Used by `lg connect` in native mode.
+func VerifyNative(cfg *config.Config) error {
+	client, err := nativeClient(cfg)
+	if err != nil {
+		return err
+	}
+	return client.Close()
 }
 
 // dialNativeSSH connects with the native client and starts the remote agent.
@@ -196,12 +225,41 @@ func remoteAgentCmd(remoteBin string, cfg *config.Config) string {
 	return cmd
 }
 
-func authMethods(cfg *config.Config) ([]ssh.AuthMethod, error) {
+// PasswordLikeQuestion reports whether an ssh prompt is asking for the account
+// password (as opposed to a Duo passcode, OTP, or verification code — a
+// "second auth" step stored credentials can't answer). Shared by the native
+// client's keyboard-interactive handler and the `lg askpass` helper, so the
+// stored password is only ever fed to an actual password prompt. "One-time
+// password"/OTP prompts contain the word "password" but are second-auth
+// challenges — excluded explicitly. An empty question is treated as a password
+// prompt: some servers send the prompt text via the instruction banner only.
+func PasswordLikeQuestion(q string) bool {
+	l := strings.ToLower(q)
+	if strings.Contains(l, "one-time password") || strings.Contains(l, "otp") {
+		return false
+	}
+	return q == "" || strings.Contains(l, "password")
+}
+
+// authMethods builds the native client's auth chain. When the host asks an
+// interactive question that isn't a password prompt (a Duo/2FA challenge), the
+// question is recorded in *secondAuthQ and that auth round fails — the caller
+// wraps the dial error with ErrSecondAuth guidance instead of a generic
+// "unable to authenticate".
+func authMethods(cfg *config.Config, secondAuthQ *string) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 
+	// recordSecondAuth remembers the first non-password challenge seen.
+	recordSecondAuth := func(q string) {
+		if secondAuthQ != nil && *secondAuthQ == "" {
+			*secondAuthQ = strings.TrimSpace(q)
+		}
+	}
+
 	// Password auth (from the encrypted store) goes first when configured. Many
-	// servers deliver "password" via keyboard-interactive, so offer both and
-	// answer every challenge with the stored password.
+	// servers deliver "password" via keyboard-interactive, so offer both — but
+	// only answer questions that actually ask for a password; feeding the
+	// password to a Duo prompt would just burn the attempt.
 	if cfg.Source.Auth == "password" {
 		pw, err := config.LoadPassword()
 		if err != nil {
@@ -214,7 +272,11 @@ func authMethods(cfg *config.Config) ([]ssh.AuthMethod, error) {
 			ssh.Password(pw),
 			ssh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
 				ans := make([]string, len(questions))
-				for i := range questions {
+				for i, q := range questions {
+					if !PasswordLikeQuestion(q) {
+						recordSecondAuth(q)
+						return nil, fmt.Errorf("unanswerable challenge %q", q)
+					}
 					ans[i] = pw
 				}
 				return ans, nil
@@ -245,6 +307,25 @@ func authMethods(cfg *config.Config) ([]ssh.AuthMethod, error) {
 	}
 	if len(methods) == 0 {
 		return nil, fmt.Errorf("no ssh auth methods available (no password, agent, or usable keys in ~/.ssh)")
+	}
+
+	// Last resort: a keyboard-interactive probe that can't answer anything but
+	// captures the host's question, so a key-auth host that follows up with a
+	// Duo/2FA challenge produces ErrSecondAuth guidance rather than a bare
+	// "unable to authenticate".
+	if cfg.Source.Auth != "password" {
+		methods = append(methods, ssh.KeyboardInteractive(
+			func(_, _ string, questions []string, _ []bool) ([]string, error) {
+				for _, q := range questions {
+					if !PasswordLikeQuestion(q) {
+						recordSecondAuth(q)
+					}
+				}
+				if len(questions) == 0 {
+					return nil, nil // no-op round (some servers send one); accept it
+				}
+				return nil, fmt.Errorf("interactive challenge with no stored credentials")
+			}))
 	}
 	return methods, nil
 }

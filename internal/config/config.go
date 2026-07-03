@@ -37,16 +37,23 @@ type Config struct {
 		//   "native": use the built-in Go ssh client (ignores ~/.ssh/config).
 		SSHMode string `yaml:"ssh_mode"`
 		// Auth selects how to authenticate:
-		//   "" (default): ssh key / agent (system or native ssh).
-		//   "password": use the password stored (encrypted) in .lg/credentials,
-		//     via the built-in Go ssh client. Forces native mode, since the system
-		//     `ssh` binary can't answer a prompt from lg's non-interactive launch.
+		//   "" (default): ssh key / agent (system or native ssh). On a system-mode
+		//     host that prompts interactively (password and/or Duo/2FA), `lg
+		//     connect` shows the prompt once and the cached master carries every
+		//     later connection.
+		//   "password": use the password stored (encrypted) in .lg/credentials.
+		//     With ssh_mode: native (what `lg init` picks for a host with no
+		//     second factor) the built-in Go client answers the prompt itself.
+		//     With ssh_mode: system (the Duo/OTP setup) `lg connect` auto-fills
+		//     the password into ssh via SSH_ASKPASS — the user only answers the
+		//     Duo step, once per control_persist window.
 		Auth string `yaml:"auth"`
 		// ControlPersist is how long lg's own ssh master (system mode only) stays
-		// alive after the last connection closes. Longer = a Duo/2FA host is
-		// authenticated once and reused for that whole window, so `lg connect`
-		// (and the prompt it triggers) is rare. ssh duration syntax: "8h", "30m",
-		// or "yes" (until reboot). Default "8h".
+		// alive after the last connection closes — the window in which no auth
+		// prompt reappears. ssh duration syntax ("8h", "30m") or "max": no timer
+		// at all, alive until the link actually drops (reboot, network death).
+		// `lg init` picks "max" for a second-auth host so a human answers Duo as
+		// rarely as possible. Default "8h".
 		ControlPersist string `yaml:"control_persist"`
 	} `yaml:"source"`
 

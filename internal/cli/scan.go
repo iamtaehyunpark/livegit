@@ -76,11 +76,12 @@ func describeProject(cfg *config.Config, connect bool) (role, host, mode, state 
 		return role, "—", "—", "(no client connection)"
 	}
 	host = cfg.Source.Host
-	switch {
-	case cfg.Source.Auth == "password":
-		return role, host, "password", "n/a (native)"
-	case cfg.Source.SSHMode == "native":
-		return role, host, "native", "n/a (native)"
+	if cfg.Source.SSHMode == "native" {
+		mode = "native"
+		if cfg.Source.Auth == "password" {
+			mode = "native/password"
+		}
+		return role, host, mode, "n/a (per-command auth)"
 	}
 	// system mode: report (and optionally establish) the cached ssh connection.
 	mode = "system"

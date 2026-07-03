@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ import (
 func newInitCmd() *cobra.Command {
 	var role, host, remoteRoot, user, auth string
 	var port int
-	var yes, forceInteractive bool
+	var yes, forceInteractive, twoFactor bool
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Set up lg for the current directory — writes ./.lg/config.yaml",
@@ -44,7 +45,7 @@ local mirror always carries the repo's own name.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			in := &wizardInput{
 				role: role, host: host, remoteRoot: remoteRoot,
-				user: user, port: port, auth: auth,
+				user: user, port: port, auth: auth, twoFactor: twoFactor,
 			}
 			// Interactive when forced, or on a TTY without full flag input.
 			interactive := forceInteractive || (term.IsTerminal(int(os.Stdin.Fd())) && !in.complete())
@@ -60,7 +61,7 @@ local mirror always carries the repo's own name.`,
 				if in.user != "" && !strings.Contains(target, "@") {
 					target = in.user + "@" + target
 				}
-				pw, err := askPassword("SSH password for " + target)
+				pw, err := askPassword(bufio.NewReader(os.Stdin), "SSH password for "+target)
 				if err != nil {
 					return err
 				}
@@ -75,6 +76,7 @@ local mirror always carries the repo's own name.`,
 	cmd.Flags().StringVar(&remoteRoot, "remote-root", "", "absolute repo path on Source")
 	cmd.Flags().StringVar(&user, "user", "", "ssh user (default $USER)")
 	cmd.Flags().StringVar(&auth, "auth", "", "auth method: '' (ssh key/agent) or 'password' (prompts, stored encrypted)")
+	cmd.Flags().BoolVar(&twoFactor, "two-factor", false, "host adds a Duo/OTP step: keep system ssh; `lg connect` auto-fills the stored password")
 	cmd.Flags().IntVar(&port, "port", 0, "ssh port (default 22)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip confirmation prompts")
 	cmd.Flags().BoolVarP(&forceInteractive, "interactive", "i", false, "force the step-by-step wizard")
@@ -93,6 +95,7 @@ type wizardInput struct {
 	port       int
 	auth       string // "" or "password"
 	password   string // collected in-memory only; stored encrypted, never in argv
+	twoFactor  bool   // host adds a Duo/OTP step: system mode + `lg connect` (with the stored password auto-filled, if any)
 }
 
 // complete reports whether enough was supplied via flags to skip prompting.
@@ -133,19 +136,40 @@ func runWizard(in *wizardInput) error {
 	in.user = ask(r, "  SSH user", curUser, false)
 	in.port = askInt(r, "  SSH port", orInt(in.port, 22))
 
-	// Auth: default to ssh key/agent; if the host needs a password, collect it
-	// (hidden) and store it encrypted. Skip if --auth already chose the method.
+	// Auth: two independent facts — does ssh ask for a password (no key set
+	// up), and does it add a second step (Duo push / OTP)? Any combination
+	// works:
+	//   password only       -> stored encrypted; native ssh answers it (zero typing)
+	//   password + 2nd step -> stored encrypted; `lg connect` auto-fills it via
+	//                          SSH_ASKPASS — you only approve the Duo prompt
+	//   2nd step only       -> `lg connect` once per window (key + Duo)
+	//   neither             -> ssh key/agent, nothing to store
+	// Skip if --auth already chose the method.
 	if in.auth == "" {
 		fmt.Println()
-		fmt.Println("Auth: leave the password blank to use your ssh key/agent (recommended).")
-		fmt.Println("Only enter a password if this host requires one and your key isn't set up.")
-		pw, err := askPassword("  SSH password (blank = ssh key/agent)")
-		if err != nil {
-			return err
+		fmt.Println("Auth: answer 'n' to both questions to use your ssh key/agent (recommended).")
+		if confirm(r, "Do you type a password when you ssh into this server (no key set up)?", false) {
+			pw, err := askPassword(r, "  SSH password (stored encrypted, never in plaintext)")
+			if err != nil {
+				return err
+			}
+			if pw != "" {
+				in.auth = "password"
+				in.password = pw
+			}
 		}
-		if pw != "" {
-			in.auth = "password"
-			in.password = pw
+		if confirm(r, "Does it also ask a second auth step (Duo push / passcode / OTP)?", false) {
+			in.twoFactor = true
+		}
+		switch {
+		case in.auth == "password" && in.twoFactor:
+			fmt.Println("  OK — lg auto-fills the stored password when connecting; you only approve")
+			fmt.Println("  the Duo prompt, and the connection stays cached until it drops (no expiry).")
+		case in.auth == "password":
+			fmt.Println("  OK — lg stores it encrypted and logs in by itself (nothing to type).")
+		case in.twoFactor:
+			fmt.Println("  OK — you'll authenticate interactively ONCE with `lg connect` (password and/or")
+			fmt.Println("  Duo as usual); the connection stays cached until it drops (no expiry).")
 		}
 	}
 
@@ -175,8 +199,18 @@ func writeConfig(in *wizardInput, skipConfirm bool) error {
 	c.Source.Port = in.port
 	c.Source.RemoteRoot = strings.TrimRight(c.Source.RemoteRoot, "/")
 	c.Source.Auth = in.auth
-	if in.auth == "password" {
-		c.Source.SSHMode = "native" // system `ssh` can't answer a prompt non-interactively
+	if in.auth == "password" && !in.twoFactor {
+		// Plain password host: the native client answers the prompt itself.
+		// With a second factor the config stays in system mode — `lg connect`
+		// auto-fills the stored password via SSH_ASKPASS and the user answers
+		// only the Duo step; the cached master carries everything after.
+		c.Source.SSHMode = "native"
+	}
+	if in.twoFactor {
+		// Second-auth prompts are the expensive ones (a human must answer), so
+		// stretch the cached connection to ssh's maximum: no timer at all — it
+		// lives until the link actually drops (reboot, network death).
+		c.Source.ControlPersist = "max"
 	}
 	if config.Role(in.role) == config.RoleGhost {
 		// Mount dir is always named after the Source repo (no selection).
@@ -254,24 +288,46 @@ func writeConfig(in *wizardInput, skipConfirm bool) error {
 		}
 	}
 
-	// Authenticate the ssh connection first (system mode). On a Duo/2FA host this
-	// shows the prompt now, while we have the terminal, and caches the connection
-	// so the agent check below — and every later lg command — reuses it without a
-	// second prompt.
-	if c.Source.SSHMode != "native" && c.Source.Auth != "password" {
-		fmt.Printf("→ connecting to %s (approve the Duo/2FA prompt if one appears) …\n", sshTarget(c))
-		if err := transport.Connect(c); err != nil {
-			fmt.Fprintf(os.Stderr, "lg: couldn't connect (%v)\n", err)
-			fmt.Fprintf(os.Stderr, "    you can retry later with `lg connect`, then `lg init` to finish agent setup.\n")
+	// Authenticate the ssh connection first (system mode). On a Duo/2FA (or
+	// password) host this shows the prompt now, while we have the terminal, and
+	// caches the connection so the agent check below — and every later lg
+	// command — reuses it without a second prompt. Without a terminal there is
+	// nowhere to render the prompt, so skip cleanly instead of hanging.
+	connected := true
+	if c.Source.SSHMode != "native" && !transport.MasterLive(c) {
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			if c.Source.Auth == "password" {
+				fmt.Printf("→ connecting to %s (password auto-filled — approve the Duo/2FA prompt if one appears) …\n", sshTarget(c))
+			} else {
+				fmt.Printf("→ connecting to %s (answer the password/Duo prompt if one appears) …\n", sshTarget(c))
+			}
+			if err := transport.Connect(c); err != nil {
+				connected = false
+				fmt.Fprintf(os.Stderr, "lg: couldn't connect (%v)\n", err)
+			}
+		} else {
+			connected = false
+			fmt.Fprintln(os.Stderr, "lg: no terminal to show the ssh/Duo prompt on.")
 		}
 	}
+	if !connected {
+		fmt.Fprintf(os.Stderr, "    finish setup once you can authenticate: `lg connect`, then `lg init` again for the agent check.\n")
+		fmt.Println("\nStart working (after `lg connect`):  lg shell")
+		fmt.Println("Change settings later with:  lg config set <key> <value>")
+		return nil
+	}
 
-	// Confirm/deploy the agent on the remote (best-effort — a host needing an
-	// interactive step, e.g. Duo, may not be reachable non-interactively here).
+	// Confirm/deploy the agent on the remote (best-effort; the connection above
+	// is live, so this runs without further prompts).
 	fmt.Printf("→ checking the agent on %s …\n", sshTarget(c))
-	if msg, err := transport.EnsureAgent(c, agentbin.Pick); err != nil {
+	if msg, err := transport.EnsureAgent(c, agentbin.Pick, Version); err != nil {
 		fmt.Fprintf(os.Stderr, "lg: couldn't verify/deploy the agent automatically (%v)\n", err)
-		fmt.Fprintf(os.Stderr, "    ensure `lg` exists at ~/.local/bin/lg on Source (or run `lg init` again once ssh works).\n")
+		if errors.Is(err, transport.ErrSecondAuth) {
+			fmt.Fprintf(os.Stderr, "    this host requires a second auth step; switch it to the cached interactive login:\n")
+			fmt.Fprintf(os.Stderr, "        lg config set source.ssh_mode system\n        lg connect      (then `lg init` again for the agent check)\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "    ensure `lg` exists at ~/.local/bin/lg on Source (or run `lg init` again once ssh works).\n")
+		}
 	} else {
 		fmt.Printf("✓ %s\n", msg)
 	}
@@ -287,8 +343,11 @@ func printSummary(c *config.Config) {
 		fmt.Printf("  server:      %s\n", sshTarget(c))
 		fmt.Printf("  remote repo: %s\n", c.Source.RemoteRoot)
 		fmt.Printf("  local mount: %s\n", c.LocalRoot)
-		if c.Source.Auth == "password" {
+		switch {
+		case c.Source.Auth == "password" && c.Source.SSHMode == "native":
 			fmt.Printf("  auth:        password (stored encrypted, native ssh)\n")
+		case c.Source.Auth == "password":
+			fmt.Printf("  auth:        password (stored encrypted, auto-filled) + Duo/2FA via `lg connect`\n")
 		}
 	} else {
 		fmt.Printf("  remote repo: %s\n", c.Source.RemoteRoot)
@@ -308,12 +367,14 @@ func sshTarget(c *config.Config) string {
 
 // --- prompt helpers ---
 
-// askPassword reads a secret without echoing it. Falls back to a plain line read
-// when stdin isn't a terminal (e.g. piped input in scripts).
-func askPassword(prompt string) (string, error) {
+// askPassword reads a secret without echoing it. Falls back to a plain line
+// read from r when stdin isn't a terminal (e.g. piped input in scripts) — r
+// must be the SAME reader the other prompts use, because a bufio.Reader slurps
+// everything piped stdin has; a second reader would find it already drained.
+func askPassword(r *bufio.Reader, prompt string) (string, error) {
 	fmt.Printf("%s: ", prompt)
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		line, _ := r.ReadString('\n')
 		return strings.TrimRight(line, "\r\n"), nil
 	}
 	b, err := term.ReadPassword(int(os.Stdin.Fd()))

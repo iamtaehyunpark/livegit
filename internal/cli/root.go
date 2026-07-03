@@ -55,6 +55,7 @@ func NewRoot() *cobra.Command {
 		newLocalCmd(),
 		newStatusCmd(),
 		newHookCmd(),
+		newAskpassCmd(),
 	)
 	return root
 }

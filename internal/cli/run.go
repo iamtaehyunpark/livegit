@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -77,12 +76,8 @@ func runRemote(args []string, localFallback, detach bool) int {
 	// a Duo prompt — they quietly fall back to the local command when Source is
 	// unreachable.
 	if !localFallback {
-		if err := transport.EnsureMaster(cfg); err != nil {
-			if errors.Is(err, transport.ErrNeedConnect) {
-				fmt.Fprintf(os.Stderr, "lg: not connected to %s — run `lg connect` first (handles Duo/2FA).\n", cfg.Source.Host)
-			} else {
-				fmt.Fprintf(os.Stderr, "lg: couldn't connect to %s: %v\n", cfg.Source.Host, err)
-			}
+		if err := ensureAuthenticated(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "lg: %v\n", err)
 			return 1
 		}
 	}

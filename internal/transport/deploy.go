@@ -19,13 +19,15 @@ type AgentPicker func(goarch string) []byte
 type sshRunner func(cmd string, stdin *bytes.Reader) (string, error)
 
 // EnsureAgent makes sure the `lg` agent is installed at ~/.local/bin/lg on
-// Source, uploading the matching embedded Linux binary if it's missing, and
-// returns a human-readable summary. Used by `lg init`.
+// Source — uploading the matching embedded Linux binary if it's missing, or
+// re-uploading when its version differs from this build (wantVersion; an old
+// agent silently times out on RPCs it doesn't know, e.g. `lg jobs`). Returns a
+// human-readable summary. Used by `lg init` and `lg connect`.
 //
 // In system-ssh mode it runs over lg's ControlMaster (reusing the connection
 // `lg connect` / `lg init` just authenticated), so it works on a Duo/2FA host
-// without a second prompt. In native/password mode it uses the Go ssh client.
-func EnsureAgent(cfg *config.Config, pick AgentPicker) (string, error) {
+// without a second prompt. In native mode it uses the Go ssh client.
+func EnsureAgent(cfg *config.Config, pick AgentPicker, wantVersion string) (string, error) {
 	run, closeFn, err := agentRunner(cfg)
 	if err != nil {
 		return "", err
@@ -33,9 +35,15 @@ func EnsureAgent(cfg *config.Config, pick AgentPicker) (string, error) {
 	defer closeFn()
 
 	// Already installed? (bare `lg` on PATH, or the standard install location.)
+	// A version match means done; a mismatch falls through to a redeploy. "dev"
+	// builds carry no comparable version, so they never force an upgrade.
+	installedVer := ""
 	if out, _ := run(`command -v lg 2>/dev/null || (test -x "$HOME/.local/bin/lg" && echo "$HOME/.local/bin/lg")`, nil); strings.TrimSpace(out) != "" {
 		ver, _ := run(`PATH="$HOME/.local/bin:$PATH" lg --version 2>/dev/null`, nil)
-		return "agent already installed on Source (" + strings.TrimSpace(ver) + ")", nil
+		installedVer = strings.TrimSpace(ver)
+		if wantVersion == "" || wantVersion == "dev" || installedVer == "lg "+wantVersion {
+			return "agent already installed on Source (" + installedVer + ")", nil
+		}
 	}
 
 	// Pick the binary for the remote architecture.
@@ -46,6 +54,11 @@ func EnsureAgent(cfg *config.Config, pick AgentPicker) (string, error) {
 	goarch := unameToGoarch(strings.TrimSpace(unameOut))
 	agent := pick(goarch)
 	if agent == nil {
+		if installedVer != "" {
+			// Can't auto-upgrade this arch, but an agent is there — report, don't fail.
+			return fmt.Sprintf("agent installed on Source (%s; local is lg %s, no embedded agent for arch %q to auto-upgrade)",
+				installedVer, wantVersion, strings.TrimSpace(unameOut)), nil
+		}
 		return "", fmt.Errorf("no embedded agent for remote arch %q; deploy it manually:\n"+
 			"    scp dist/lg-linux-%s %s:~/.local/bin/lg",
 			strings.TrimSpace(unameOut), goarch, sshTargetOf(cfg))
@@ -60,6 +73,9 @@ func EnsureAgent(cfg *config.Config, pick AgentPicker) (string, error) {
 	ver, err := run(`PATH="$HOME/.local/bin:$PATH" lg --version`, nil)
 	if err != nil {
 		return "", fmt.Errorf("uploaded, but the agent won't run: %w", err)
+	}
+	if installedVer != "" {
+		return fmt.Sprintf("upgraded agent at ~/.local/bin/lg (%s -> %s, linux-%s)", installedVer, strings.TrimSpace(ver), goarch), nil
 	}
 	return fmt.Sprintf("deployed agent to ~/.local/bin/lg (linux-%s, %s)", goarch, strings.TrimSpace(ver)), nil
 }

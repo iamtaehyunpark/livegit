@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -27,7 +28,10 @@ func TestUsesControlMaster(t *testing.T) {
 		{"system", "", true},
 		{"", "", true}, // empty mode defaults to system elsewhere; helper treats it as system
 		{"native", "", false},
-		{"system", "password", false},
+		{"native", "password", false},
+		// password + system = the Duo/2FA setup: `lg connect` authenticates the
+		// master interactively (password + Duo), later connections multiplex.
+		{"system", "password", true},
 	}
 	for _, tc := range cases {
 		if got := usesControlMaster(ghostCfg(tc.mode, tc.auth, "8h", 22)); got != tc.want {
@@ -72,16 +76,32 @@ func TestPortArgs(t *testing.T) {
 }
 
 func TestPersistLabel(t *testing.T) {
-	if got := PersistLabel(ghostCfg("system", "", "", 22)); got != "8h" {
-		t.Errorf("empty persist label = %q, want 8h", got)
+	if got := PersistLabel(ghostCfg("system", "", "", 22)); got != "for 8h" {
+		t.Errorf("empty persist label = %q, want 'for 8h'", got)
 	}
-	if got := PersistLabel(ghostCfg("system", "", "2h", 22)); got != "2h" {
-		t.Errorf("persist label = %q, want 2h", got)
+	if got := PersistLabel(ghostCfg("system", "", "2h", 22)); got != "for 2h" {
+		t.Errorf("persist label = %q, want 'for 2h'", got)
+	}
+	if got := PersistLabel(ghostCfg("system", "", "max", 22)); got != "until the connection drops (no expiry)" {
+		t.Errorf("max persist label = %q", got)
+	}
+}
+
+// "max" (and the spellings users guess) must reach ssh as ControlPersist=yes;
+// durations and the empty default pass through.
+func TestPersistValue(t *testing.T) {
+	for in, want := range map[string]string{
+		"": "8h", "30m": "30m", "8h": "8h",
+		"max": "yes", "MAX": "yes", "forever": "yes", "yes": "yes", "0": "yes",
+	} {
+		if got := persistValue(ghostCfg("system", "", in, 22)); got != want {
+			t.Errorf("persistValue(%q)=%q want %q", in, got, want)
+		}
 	}
 }
 
 // MasterLive / StopMaster / EnsureMaster must be no-ops (never shell out) for
-// native/password mode, so a password project never pays for ssh -O check.
+// native mode, so a native project never pays for ssh -O check.
 func TestControlMasterNoopForNative(t *testing.T) {
 	if MasterLive(ghostCfg("native", "", "8h", 22)) {
 		t.Error("MasterLive should be false for native mode")
@@ -89,7 +109,70 @@ func TestControlMasterNoopForNative(t *testing.T) {
 	if err := StopMaster(ghostCfg("native", "", "8h", 22)); err != nil {
 		t.Errorf("StopMaster native should be nil, got %v", err)
 	}
-	if err := EnsureMaster(ghostCfg("system", "password", "8h", 22)); err != nil {
-		t.Errorf("EnsureMaster password should be nil, got %v", err)
+	if err := EnsureMaster(ghostCfg("native", "password", "8h", 22)); err != nil {
+		t.Errorf("EnsureMaster native/password should be nil, got %v", err)
+	}
+}
+
+// A second-auth (Duo/OTP) challenge must never be answered with the stored
+// password; only password-looking questions are. The one-time-password rows
+// are the traps: they contain "password" but are second-auth challenges.
+func TestPasswordLikeQuestion(t *testing.T) {
+	for q, want := range map[string]bool{
+		"Password: ":                      true,
+		"user@host's password:":           true,
+		"":                                true, // prompt text sometimes rides the banner
+		"Duo two-factor login for tpark":  false,
+		"Passcode or option (1-2): ":      false,
+		"Verification code: ":             false,
+		"Enter a passcode or select one of the following options:": false,
+		"One-time password (OATH) for `tpark':":                    false,
+		"Enter your one-time password:":                            false,
+		"OTP Code:":                                                false,
+	} {
+		if got := PasswordLikeQuestion(q); got != want {
+			t.Errorf("PasswordLikeQuestion(%q)=%v want %v", q, got, want)
+		}
+	}
+}
+
+// askpassEnv must write an executable shim that pins the project (LG_HOME) and
+// re-invokes this binary, and point SSH_ASKPASS at it with force mode — no
+// secrets in the script itself.
+func TestAskpassEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LG_HOME", dir)
+	env, err := askpassEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	wantForce := false
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, "SSH_ASKPASS="); ok {
+			script = v
+		}
+		if e == "SSH_ASKPASS_REQUIRE=force" {
+			wantForce = true
+		}
+	}
+	if script == "" || !wantForce {
+		t.Fatalf("env missing SSH_ASKPASS / SSH_ASKPASS_REQUIRE=force: %v", env)
+	}
+	body, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"LG_HOME='" + dir + "'", "askpass \"$@\""} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("shim missing %q:\n%s", want, body)
+		}
+	}
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Errorf("shim is not executable: %v", info.Mode())
 	}
 }

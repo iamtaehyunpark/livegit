@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -43,6 +44,22 @@ func newClient(c *config.Config) *transport.Client {
 	return client
 }
 
+// ensureAuthenticated is the shared pre-dial auth guard: on a Duo/2FA host it
+// bootstraps the ssh connection interactively when a terminal is attached (the
+// automatic `lg connect` fallback), and otherwise returns actionable "run
+// `lg connect`" guidance instead of letting the background dialer fail
+// silently. No-op in native mode (connections carry their own credentials).
+func ensureAuthenticated(cfg *config.Config) error {
+	err := transport.EnsureMaster(cfg)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, transport.ErrNeedConnect) {
+		return fmt.Errorf("not connected to %s — run `lg connect` first (handles Duo/2FA)", cfg.Source.Host)
+	}
+	return fmt.Errorf("couldn't connect to %s: %w", cfg.Source.Host, err)
+}
+
 // connectedClient loads the ghost config, dials Source, and blocks until the
 // link is online (or times out). The caller owns Close(). It's the shared setup
 // for the short-lived job commands (jobs/logs), which just need one RPC round
@@ -53,10 +70,13 @@ func connectedClient(timeout time.Duration) (*transport.Client, error) {
 		return nil, err
 	}
 	routeLogsToFile(cfg)
+	if err := ensureAuthenticated(cfg); err != nil {
+		return nil, err
+	}
 	client := newClient(cfg)
 	if err := waitOnline(client, timeout); err != nil {
 		_ = client.Close()
-		return nil, fmt.Errorf("not connected to %s (%v)", cfg.Source.Host, err)
+		return nil, fmt.Errorf("not connected to %s (%v) — see %s", cfg.Source.Host, err, config.LogPath())
 	}
 	return client, nil
 }

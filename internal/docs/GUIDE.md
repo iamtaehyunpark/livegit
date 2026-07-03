@@ -47,7 +47,8 @@ The wizard asks for:
 | SSH host | `gpu-1`, `user@1.2.3.4`, or an `~/.ssh/config` alias. |
 | Remote repo path | Absolute path of the repo **on the server**, e.g. `/home/you/myrepo`. |
 | SSH user / port | Defaults to `$USER` / 22. |
-| SSH password | **Leave blank** to use your ssh key/agent (recommended). Only type a password if the host requires one and you don't have a key set up — it's stored encrypted (see [Auth](#authentication--log-in-once-never-again)). |
+| Password? | Answer **y** only if you type a password when you ssh in (no key set up). It's stored **encrypted** and lg fills it in for you from then on (see [Auth](#authentication--log-in-once-never-again)). Answer **n** to use your ssh key/agent (recommended). |
+| Second auth step? | Answer **y** if the host *also* asks for Duo / a passcode / an OTP. With a stored password, `lg connect` auto-fills it and you only approve the Duo prompt. The connection is then cached with **no expiry** (`control_persist: max`) — you re-approve only when the link itself drops. Without a stored password, you authenticate interactively once with `lg connect`, exactly like plain ssh. |
 
 Non-interactive (scriptable) form:
 
@@ -55,6 +56,8 @@ Non-interactive (scriptable) form:
 lg init --role ghost --host gpu-1 --remote-root /home/you/myrepo
 # password host:
 lg init --role ghost --host 1.2.3.4 --user you --remote-root /data/proj --auth password
+# password + Duo host (password auto-filled; you approve the Duo prompt at `lg connect`):
+lg init --role ghost --host lab-1 --user you --remote-root /data/proj --auth password --two-factor
 ```
 
 After you confirm, `lg init`:
@@ -143,12 +146,15 @@ command over it, so there's no per-command login.
   IdentityFile, known_hosts. On a key-only host you never see a prompt.
 - **2FA / Duo hosts:** the first connection needs your approval (a Duo push or a
   passcode). `lg` owns a dedicated, reusable ssh connection and authenticates it
-  **once** with `lg connect`, then caches it for `source.control_persist`
-  (default **8 hours**) and reuses it for every later `lg <cmd>`, `lg run`, and
-  `lg shell` — no more prompts until it expires.
+  **once** with `lg connect`, then keeps it cached for `source.control_persist`
+  and reuses it for every later `lg <cmd>`, `lg run`, and `lg shell`. For hosts
+  set up with the "second auth step" answer, `lg init` writes
+  `control_persist: max` — **no expiry at all**: the connection lives until it
+  actually drops (reboot, long offline stretch), so re-approving Duo is as rare
+  as ssh allows. (Other hosts default to `8h`.)
 
   ```sh
-  lg connect            # approve the Duo prompt once; cached for 8h
+  lg connect            # approve the Duo prompt once; cached until the link drops
   lg connect --check    # is the connection live?
   lg connect --stop     # close it (the next command re-authenticates)
   ```
@@ -157,15 +163,26 @@ command over it, so there's no per-command login.
   bring the connection up for you (you'll just see the Duo prompt inline the
   first time). Run it explicitly to pre-authenticate — e.g. before a scripted
   run, or so a tool that can't answer a Duo prompt finds the connection ready.
-- **Password:** for hosts that only take a password and where you can't use a
-  key. `lg init` (or `--auth password`) prompts once and stores the password
-  **encrypted** at `<project>/.lg/credentials` (AES-GCM, with a key derived from
-  your machine — copying the file to another computer won't decrypt it). It's
-  never written in plaintext and never in `config.yaml`. lg then authenticates
-  automatically with the built-in ssh client (no ssh master needed).
+- **Password (no second factor):** for hosts that only take a password and
+  where you can't use a key. `lg init` (or `--auth password`) prompts once and
+  stores the password **encrypted** at `<project>/.lg/credentials` (AES-GCM,
+  with a key derived from your machine — copying the file to another computer
+  won't decrypt it). It's never written in plaintext and never in
+  `config.yaml`. lg then authenticates automatically with the built-in ssh
+  client (no ssh master needed).
+- **Password + Duo/2FA:** answer **y** to both wizard questions (or pass
+  `--auth password --two-factor`). The password is stored encrypted exactly as
+  above, and `lg connect` **auto-fills it** into ssh's prompt (via an
+  `SSH_ASKPASS` helper) — the only thing left for you is the Duo approval,
+  once per cached connection. A stored password can't answer the Duo challenge
+  itself, which is why these hosts stay in system-ssh mode with the cached
+  master instead of the native client. If a project was mistakenly set to
+  native mode on a Duo host, `lg connect` detects it and prints the switch:
+  `lg config set source.ssh_mode system`, then `lg connect`.
 
-After the first login you shouldn't see another prompt for hours — across laptop
-sleep, wifi changes, or restarting `lg` — until the cached window expires.
+After the first login you shouldn't see another prompt — across laptop sleep,
+wifi changes, or restarting `lg` — until the cached connection expires (`8h`
+default) or, on a `control_persist: max` host, until the link itself dies.
 
 ---
 
@@ -199,8 +216,8 @@ Settings live in `<project>/.lg/config.yaml`. Change scalars with
 | `source.host` / `source.user` / `source.port` | The server. |
 | `source.remote_root` | Absolute repo path on the server. |
 | `source.ssh_mode` | `system` (default, honors ~/.ssh/config) or `native` (built-in client). |
-| `source.auth` | `` (key/agent) or `password` (uses the encrypted store, native ssh). |
-| `source.control_persist` | How long the cached ssh connection lives after last use (default `8h`). Longer = fewer 2FA prompts. `system` mode only. |
+| `source.auth` | `` (key/agent or interactive-via-`lg connect`) or `password` (encrypted store; native ssh answers it directly, or — with `ssh_mode: system` on a Duo host — `lg connect` auto-fills it via SSH_ASKPASS). |
+| `source.control_persist` | How long the cached ssh connection lives after last use: a duration (default `8h`) or `max` (no expiry — lives until the link drops; what `lg init` picks for second-auth hosts). Longer = fewer 2FA prompts. `system` mode only. |
 | `source.agent_bin` | Path to `lg` on the server; default `lg` (resolved from `~/.local/bin`). |
 | `local_root` | The mount folder (set for you at init, named after the repo). |
 | `ignore` | Patterns never synced/listed (`.venv/`, `node_modules/`, `.DS_Store`, `*.pt`, …). Keeps the tree fast and clean. |
