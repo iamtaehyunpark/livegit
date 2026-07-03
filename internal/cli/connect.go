@@ -37,10 +37,6 @@ agent that can't answer a Duo prompt), or to check/reset the connection.`,
 				return err
 			}
 
-			// Native mode has no master — every connection authenticates itself
-			// with the stored credentials. `lg connect` still earns its keep as a
-			// credential test: it detects a Duo/2FA host (which native mode cannot
-			// serve) and says how to switch.
 			if cfg.Source.SSHMode == "native" {
 				switch {
 				case stop:
@@ -51,26 +47,12 @@ agent that can't answer a Duo prompt), or to check/reset the connection.`,
 					fmt.Println("Run `lg connect` (no flags) to test that those credentials still work.")
 					return nil
 				}
-				fmt.Printf("Testing the stored credentials against %s …\n", cfg.Source.Host)
-				if err := transport.VerifyNative(cfg); err != nil {
-					if errors.Is(err, transport.ErrSecondAuth) {
-						return err
-					}
-					return fmt.Errorf("credential test failed: %w", err)
-				}
-				fmt.Println("✓ credentials work. Native mode authenticates every command automatically —")
-				fmt.Println("  there is no session to keep alive, so you're done.")
-				checkAgent(cfg)
-				return nil
+				return establishConnection(cfg, false)
 			}
 
 			switch {
 			case stop:
-				if err := transport.StopMaster(cfg); err != nil {
-					return fmt.Errorf("stop connection: %w", err)
-				}
-				fmt.Println("ssh connection closed — the next lg command will re-authenticate.")
-				return nil
+				return closeConnection(cfg)
 			case check:
 				if transport.MasterLive(cfg) {
 					fmt.Printf("connection: live (cached; new commands to %s won't re-prompt)\n", cfg.Source.Host)
@@ -79,31 +61,112 @@ agent that can't answer a Duo prompt), or to check/reset the connection.`,
 				}
 				return nil
 			}
-
-			if transport.MasterLive(cfg) {
-				fmt.Printf("Already connected to %s (reusing the cached ssh connection).\n", cfg.Source.Host)
-				return nil
-			}
-			if cfg.Source.Auth == "password" {
-				fmt.Printf("Connecting to %s — password auto-filled; approve the Duo/2FA prompt if one appears…\n", cfg.Source.Host)
-			} else {
-				fmt.Printf("Connecting to %s — answer the password/Duo prompt if one appears…\n", cfg.Source.Host)
-			}
-			if err := transport.Connect(cfg); err != nil {
-				return err
-			}
-			fmt.Printf("✓ connected. Cached %s; further lg commands won't re-prompt.\n", transport.PersistLabel(cfg))
-
-			// While the connection is fresh, make sure the agent is in place —
-			// this makes `lg connect` the one recovery command after an init that
-			// couldn't authenticate (no need to run the init wizard again).
-			checkAgent(cfg)
-			return nil
+			return establishConnection(cfg, false)
 		},
 	}
 	c.Flags().BoolVar(&check, "check", false, "just report whether the connection is live")
 	c.Flags().BoolVar(&stop, "stop", false, "close the cached connection (next command re-authenticates)")
 	return c
+}
+
+// establishConnection is the shared body of `lg connect` and `lg refresh`.
+// In native mode there is no cached connection — it tests the stored
+// credentials instead (and detects a Duo/2FA host, which native mode cannot
+// serve, printing how to switch). In system mode it brings the master up
+// (showing any Duo prompt on the terminal); with force set it closes a live
+// master first so the authentication — and its cached window — start fresh.
+func establishConnection(cfg *config.Config, force bool) error {
+	if cfg.Source.SSHMode == "native" {
+		fmt.Printf("Testing the stored credentials against %s …\n", cfg.Source.Host)
+		if err := transport.VerifyNative(cfg); err != nil {
+			if errors.Is(err, transport.ErrSecondAuth) {
+				return err
+			}
+			return fmt.Errorf("credential test failed: %w", err)
+		}
+		fmt.Println("✓ credentials work. Native mode authenticates every command automatically —")
+		fmt.Println("  there is no session to keep alive, so you're done.")
+		checkAgent(cfg)
+		return nil
+	}
+
+	if transport.MasterLive(cfg) {
+		if !force {
+			fmt.Printf("Already connected to %s (reusing the cached ssh connection).\n", cfg.Source.Host)
+			return nil
+		}
+		if err := transport.StopMaster(cfg); err != nil {
+			return fmt.Errorf("close old connection: %w", err)
+		}
+	}
+	if cfg.Source.Auth == "password" {
+		fmt.Printf("Connecting to %s — password auto-filled; approve the Duo/2FA prompt if one appears…\n", cfg.Source.Host)
+	} else {
+		fmt.Printf("Connecting to %s — answer the password/Duo prompt if one appears…\n", cfg.Source.Host)
+	}
+	if err := transport.Connect(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("✓ connected. Cached %s; further lg commands won't re-prompt.\n", transport.PersistLabel(cfg))
+
+	// While the connection is fresh, make sure the agent is in place — this
+	// makes `lg connect`/`lg refresh` the one recovery command after an init
+	// that couldn't authenticate (no need to run the init wizard again).
+	checkAgent(cfg)
+	return nil
+}
+
+// closeConnection tears down the cached master (shared by `lg disconnect` and
+// `lg connect --stop`).
+func closeConnection(cfg *config.Config) error {
+	if !transport.MasterLive(cfg) {
+		fmt.Println("no cached connection to close.")
+		return nil
+	}
+	if err := transport.StopMaster(cfg); err != nil {
+		return fmt.Errorf("stop connection: %w", err)
+	}
+	fmt.Println("ssh connection closed — the next lg command will re-authenticate.")
+	return nil
+}
+
+// newDisconnectCmd closes the cached ssh connection (the explicit sibling of
+// `lg connect`; same effect as `lg connect --stop`).
+func newDisconnectCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "disconnect",
+		Short: "Close the cached ssh connection to Source",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadGhost()
+			if err != nil {
+				return err
+			}
+			if cfg.Source.SSHMode == "native" {
+				fmt.Println("native mode: no cached connection to close (each command authenticates itself).")
+				return nil
+			}
+			return closeConnection(cfg)
+		},
+	}
+}
+
+// newRefreshCmd re-authenticates the connection: it closes any live master and
+// opens a new one, restarting the cached window from now (e.g. before an
+// overnight run, so the window doesn't expire midway).
+func newRefreshCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "refresh",
+		Short: "Re-authenticate the connection to Source (restarts the cached window)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadGhost()
+			if err != nil {
+				return err
+			}
+			return establishConnection(cfg, true)
+		},
+	}
 }
 
 // checkAgent verifies (and if needed deploys/upgrades) the remote agent over

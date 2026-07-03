@@ -52,8 +52,8 @@ type Config struct {
 		// alive after the last connection closes — the window in which no auth
 		// prompt reappears. ssh duration syntax ("8h", "30m") or "max": no timer
 		// at all, alive until the link actually drops (reboot, network death).
-		// `lg init` picks "max" for a second-auth host so a human answers Duo as
-		// rarely as possible. Default "8h".
+		// `lg init` picks "10h" for a second-auth host (one Duo approval covers a
+		// work day, without holding a session open indefinitely). Default "8h".
 		ControlPersist string `yaml:"control_persist"`
 	} `yaml:"source"`
 

@@ -228,6 +228,7 @@ edit-and-inspect loop, and it "just works" from the first prompt because
 | `lg run -d -- <command>` | Launch a detached job that outlives this shell |
 | `lg jobs` / `lg logs [-f] <id>` | List detached jobs / show or follow their output |
 | `lg shell` | Mount the remote tree and open a shell with `lg` integration |
+| `lg connect` / `lg refresh` / `lg disconnect` | Authenticate once (Duo/2FA) / re-authenticate now / close the cached connection |
 | `lg toggle` / `lg local` | Send every command to the server / turn that off |
 | `lg status` | Connection, toggle state, sync freshness, cache, pending writes |
 | `lg config get\|set\|edit\|show` | Inspect or change settings safely |

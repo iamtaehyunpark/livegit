@@ -48,7 +48,7 @@ The wizard asks for:
 | Remote repo path | Absolute path of the repo **on the server**, e.g. `/home/you/myrepo`. |
 | SSH user / port | Defaults to `$USER` / 22. |
 | Password? | Answer **y** only if you type a password when you ssh in (no key set up). It's stored **encrypted** and lg fills it in for you from then on (see [Auth](#authentication--log-in-once-never-again)). Answer **n** to use your ssh key/agent (recommended). |
-| Second auth step? | Answer **y** if the host *also* asks for Duo / a passcode / an OTP. With a stored password, `lg connect` auto-fills it and you only approve the Duo prompt. The connection is then cached with **no expiry** (`control_persist: max`) — you re-approve only when the link itself drops. Without a stored password, you authenticate interactively once with `lg connect`, exactly like plain ssh. |
+| Second auth step? | Answer **y** if the host *also* asks for Duo / a passcode / an OTP. With a stored password, `lg connect` auto-fills it and you only approve the Duo prompt — once per cached window (**10h** on these hosts; `control_persist: 10h`). Without a stored password, you authenticate interactively once with `lg connect`, exactly like plain ssh. |
 
 Non-interactive (scriptable) form:
 
@@ -149,14 +149,15 @@ command over it, so there's no per-command login.
   **once** with `lg connect`, then keeps it cached for `source.control_persist`
   and reuses it for every later `lg <cmd>`, `lg run`, and `lg shell`. For hosts
   set up with the "second auth step" answer, `lg init` writes
-  `control_persist: max` — **no expiry at all**: the connection lives until it
-  actually drops (reboot, long offline stretch), so re-approving Duo is as rare
-  as ssh allows. (Other hosts default to `8h`.)
+  `control_persist: 10h` — one Duo approval covers a full work day. (Other
+  hosts default to `8h`; set `max` for no expiry at all.)
 
   ```sh
-  lg connect            # approve the Duo prompt once; cached until the link drops
+  lg connect            # approve the Duo prompt once; cached for the window (10h)
   lg connect --check    # is the connection live?
-  lg connect --stop     # close it (the next command re-authenticates)
+  lg refresh            # re-authenticate NOW — restarts the window (e.g. before
+                        # an overnight run, so it can't expire midway)
+  lg disconnect         # close it (the next command re-authenticates)
   ```
 
   You rarely run `lg connect` by hand: on a terminal, `lg <cmd>` and `lg shell`
@@ -182,7 +183,8 @@ command over it, so there's no per-command login.
 
 After the first login you shouldn't see another prompt — across laptop sleep,
 wifi changes, or restarting `lg` — until the cached connection expires (`8h`
-default) or, on a `control_persist: max` host, until the link itself dies.
+default, `10h` on second-auth hosts) — or run `lg refresh` to restart the
+window on demand.
 
 ---
 
@@ -194,6 +196,8 @@ default) or, on a `control_persist: max` host, until the link itself dies.
 | `lg run -- <cmd>` | Same, explicit form (use when `<cmd>` clashes with a subcommand). |
 | `lg shell` | Mount the repo folder + start your shell. `exit` to leave. |
 | `lg connect` | Authenticate to the server once (handles Duo/2FA); reused for hours. `--check` / `--stop`. |
+| `lg refresh` | Re-authenticate now — restarts the cached window (e.g. before an overnight run). |
+| `lg disconnect` | Close the cached connection (next command re-authenticates). |
 | `lg toggle` / `lg local` | Turn "everything runs on the server" on / off. |
 | `lg status` | Connection state, toggle, tree-sync freshness, cache, pending writes. |
 | `lg scan [dir]` | List every lg project on this machine (default `$HOME`) and its connection state. |
@@ -217,7 +221,7 @@ Settings live in `<project>/.lg/config.yaml`. Change scalars with
 | `source.remote_root` | Absolute repo path on the server. |
 | `source.ssh_mode` | `system` (default, honors ~/.ssh/config) or `native` (built-in client). |
 | `source.auth` | `` (key/agent or interactive-via-`lg connect`) or `password` (encrypted store; native ssh answers it directly, or — with `ssh_mode: system` on a Duo host — `lg connect` auto-fills it via SSH_ASKPASS). |
-| `source.control_persist` | How long the cached ssh connection lives after last use: a duration (default `8h`) or `max` (no expiry — lives until the link drops; what `lg init` picks for second-auth hosts). Longer = fewer 2FA prompts. `system` mode only. |
+| `source.control_persist` | How long the cached ssh connection lives after last use: a duration (default `8h`; `lg init` picks `10h` for second-auth hosts) or `max` (no expiry — lives until the link drops). Longer = fewer 2FA prompts. `system` mode only. |
 | `source.agent_bin` | Path to `lg` on the server; default `lg` (resolved from `~/.local/bin`). |
 | `local_root` | The mount folder (set for you at init, named after the repo). |
 | `ignore` | Patterns never synced/listed (`.venv/`, `node_modules/`, `.DS_Store`, `*.pt`, …). Keeps the tree fast and clean. |

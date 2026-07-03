@@ -164,12 +164,12 @@ func runWizard(in *wizardInput) error {
 		switch {
 		case in.auth == "password" && in.twoFactor:
 			fmt.Println("  OK — lg auto-fills the stored password when connecting; you only approve")
-			fmt.Println("  the Duo prompt, and the connection stays cached until it drops (no expiry).")
+			fmt.Println("  the Duo prompt, once per cached window (10h).")
 		case in.auth == "password":
 			fmt.Println("  OK — lg stores it encrypted and logs in by itself (nothing to type).")
 		case in.twoFactor:
 			fmt.Println("  OK — you'll authenticate interactively ONCE with `lg connect` (password and/or")
-			fmt.Println("  Duo as usual); the connection stays cached until it drops (no expiry).")
+			fmt.Println("  Duo as usual); lg caches that connection for 10h and every command reuses it.")
 		}
 	}
 
@@ -208,9 +208,11 @@ func writeConfig(in *wizardInput, skipConfirm bool) error {
 	}
 	if in.twoFactor {
 		// Second-auth prompts are the expensive ones (a human must answer), so
-		// stretch the cached connection to ssh's maximum: no timer at all — it
-		// lives until the link actually drops (reboot, network death).
-		c.Source.ControlPersist = "max"
+		// give 2FA hosts a longer window: one Duo approval covers a full work
+		// day. Capped at 10h rather than unbounded ("max" remains available via
+		// `lg config set source.control_persist max`) so a forgotten laptop
+		// doesn't hold an authenticated session open indefinitely.
+		c.Source.ControlPersist = "10h"
 	}
 	if config.Role(in.role) == config.RoleGhost {
 		// Mount dir is always named after the Source repo (no selection).

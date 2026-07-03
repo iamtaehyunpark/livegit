@@ -93,8 +93,8 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   widget / bash DEBUG trap (`internal/shell/integration.go`) do the rewrite; the list
   is baked into the generated hook at `lg shell` start.
 - `lg connect` — authenticate to Source **once** (handles Duo/2FA), then reuse
-  the cached ssh connection for `source.control_persist` (default 8h; `max` = no
-  expiry, lives until the link drops — what `lg init` picks for 2FA hosts).
+  the cached ssh connection for `source.control_persist` (default 8h; `lg init`
+  picks 10h for 2FA hosts; `max` = no expiry, lives until the link drops).
   On a password host the stored password is **auto-filled** via SSH_ASKPASS
   (hidden `lg askpass` helper + shim at `.lg/run/askpass.sh`); only the Duo
   approval is left. Also verifies/upgrades the remote agent after connecting.
@@ -102,6 +102,8 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   pre-authenticate before a scripted/agent-driven run that can't answer a Duo
   prompt. `--check` reports liveness; `--stop` closes it. In native mode it's a
   credential test (detects a Duo host and prints how to switch to system mode).
+- `lg refresh` — close + reopen the connection now (fresh auth, restarts the
+  cached window). `lg disconnect` — close it (same as `lg connect --stop`).
 - `lg scan [root]` — machine-wide view: walk the filesystem (default `$HOME`,
   depth-capped, skipping dotdirs/`node_modules`/`~/Library`) for every
   `.lg/config.yaml` and print each project's host, mode, and connection state
@@ -200,9 +202,9 @@ questions (`lg init` flags: `--auth password`, `--two-factor`):
   answers only password-*looking* questions (`PasswordLikeQuestion`; one-time
   password/OTP prompts excluded) — a Duo challenge surfaces as `ErrSecondAuth`
   with switch-to-system guidance instead of burning the attempt.
-- **password + 2FA** → `ssh_mode: system` + `control_persist: max`: `lg connect`
+- **password + 2FA** → `ssh_mode: system` + `control_persist: 10h`: `lg connect`
   auto-fills the password into ssh via SSH_ASKPASS (see above); the user only
-  approves Duo, and the master then carries everything with no expiry.
+  approves Duo, and the master carries everything for the 10h window.
 
 `lg init` **and `lg connect`** confirm/deploy the agent: `transport.EnsureAgent`
 (`internal/transport/deploy.go`) connects, checks for `lg` on the remote, pipes
