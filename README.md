@@ -283,6 +283,28 @@ server naturally require actual hardware.
 
 ## How it works
 
+```
+┌── YOUR LAPTOP (Ghost) ─────┐                    ┌── GPU SERVER (Source) ─────┐
+│                            │                    │                            │
+│  lg <cmd> ─────────────────┼──── PTY exec ─────▶│  runs in the matching dir  │
+│   (live output, exit code)◀┼────────────────────┼─  in a real terminal       │
+│                            │                    │                            │
+│  myrepo/  ← the mount      │                    │  the real repo             │
+│   browse: whole tree  ◀────┼── tree + file RPC ─┼─  file server              │
+│   open: content on demand  │                    │                            │
+│   save: syncs back ────────┼──── journal ──────▶│  write applied             │
+│   remote edits appear ◀────┼── invalidations ───┼─  watcher                  │
+│                            │                    │                            │
+│  lg run -d ────────────────┼──── job RPC ──────▶│  systemd --user job        │
+│  lg logs -f  ◀─────────────┼──── log tail ──────┼─  (outlives your session)  │
+│                            │                    │                            │
+└──────────────┬─────────────┘                    └─────────────┬──────────────┘
+               │                                                │
+               └──────────── one ssh connection ────────────────┘
+                  yamux-multiplexed; authenticated once (`lg connect`
+                  handles Duo/2FA), then cached and reused for hours
+```
+
 One SSH connection to the server carries several logical streams multiplexed with
 [yamux]: a control channel, file RPCs, change notifications, and a PTY per remote
 command. The server side is a small agent (`lg serve`) launched over SSH on
