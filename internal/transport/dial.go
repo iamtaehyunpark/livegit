@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
@@ -21,6 +22,14 @@ import (
 // sshConn is a live connection to Source whose pipe carries the yamux session.
 // closer tears down whatever backs it (a native ssh client, or a spawned `ssh`
 // subprocess).
+//
+// The SAME closer is also wired into the pipe (rwc.c): yamux calls conn.Close()
+// inside Session.Close() and then blocks until its recvLoop exits, but the
+// recvLoop only exits when the underlying ssh dies and the stdout pipe EOFs.
+// If the pipe's Close were a no-op, a wedged ssh (network black hole) would
+// leave Session.Close hanging forever — and its streams spinning hot on the
+// closed shutdownCh (100% CPU). Seen live 2026-07-08. newConnCloser makes the
+// closer idempotent so both call sites can fire it safely.
 type sshConn struct {
 	pipe   *rwc
 	closer func() error
@@ -31,6 +40,22 @@ func (c *sshConn) Close() error {
 		return c.closer()
 	}
 	return nil
+}
+
+// closerFunc adapts a func to io.Closer (for rwc.c).
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
+
+// newConnCloser wraps a teardown func so it runs exactly once no matter how
+// many paths call it (yamux's Session.Close, connectOnce, Client.Close).
+func newConnCloser(f func() error) func() error {
+	var once sync.Once
+	var err error
+	return func() error {
+		once.Do(func() { err = f() })
+		return err
+	}
 }
 
 // dialSSH dispatches to the configured transport. "system" (default) shells out
@@ -151,15 +176,16 @@ func dialNativeSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 		}
 		return nil, fmt.Errorf("start remote agent: %w", err)
 	}
+	closer := newConnCloser(func() error {
+		_ = session.Close()
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		return client.Close()
+	})
 	return &sshConn{
-		pipe: &rwc{r: stdout, w: stdin, c: nil},
-		closer: func() error {
-			_ = session.Close()
-			if logFile != nil {
-				_ = logFile.Close()
-			}
-			return client.Close()
-		},
+		pipe:   &rwc{r: stdout, w: stdin, c: closerFunc(closer)},
+		closer: closer,
 	}, nil
 }
 
@@ -215,18 +241,19 @@ func dialSystemSSH(cfg *config.Config, remoteBin string) (*sshConn, error) {
 		}
 		return nil, fmt.Errorf("spawn ssh: %w", err)
 	}
+	closer := newConnCloser(func() error {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		return nil
+	})
 	return &sshConn{
-		pipe: &rwc{r: stdout, w: stdin, c: nil},
-		closer: func() error {
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			_ = cmd.Wait()
-			if logFile != nil {
-				_ = logFile.Close()
-			}
-			return nil
-		},
+		pipe:   &rwc{r: stdout, w: stdin, c: closerFunc(closer)},
+		closer: closer,
 	}, nil
 }
 

@@ -151,8 +151,12 @@ func (c *Client) connectOnce() error {
 	case <-c.ctx.Done():
 	}
 	c.status.set(false)
-	_ = sess.Close()
+	// conn BEFORE sess: sess.Close blocks until yamux's recvLoop exits, and the
+	// recvLoop only exits once the ssh underneath is dead and the pipe EOFs.
+	// Closing the session first with a wedged ssh deadlocked this goroutine for
+	// hours (and span the stream readers at 100% CPU) — see sshConn's comment.
 	_ = conn.Close()
+	_ = sess.Close()
 	logx.For("client").Warn("connection lost")
 	return nil
 }
