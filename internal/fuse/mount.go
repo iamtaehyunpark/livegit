@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -41,6 +42,12 @@ func NewMount(mountpoint string, b *Backend) (*Mount, error) {
 	opts.MountOptions.FsName = "lg"
 	opts.MountOptions.Name = "livegit"
 	opts.MountOptions.AllowOther = false
+	if runtime.GOOS == "darwin" {
+		// macFUSE: refuse AppleDouble companions (._*, .DS_Store) in the kernel,
+		// so Finder's per-folder junk probes never even reach this process.
+		// Standard practice for network filesystems (sshfs ships with it).
+		opts.MountOptions.Options = append(opts.MountOptions.Options, "noappledouble")
+	}
 
 	server, err := fs.Mount(mountpoint, root, opts)
 	if err != nil {

@@ -37,9 +37,13 @@ func (b *Backend) Getattr(ctx context.Context, rel string) (Attr, error) {
 		}
 		return Attr{Exists: true, IsDir: e.IsDir, Size: e.Size, ModTime: e.ModTime, Mode: e.Mode}, nil
 	}
-	// Not yet in the index. If online, ask Source so first lookups during the
-	// initial sync still resolve; record what we learn.
-	if !b.source.Online() {
+	// Not in the index. Once a full-tree sync has completed the index is
+	// authoritative — answer ENOENT locally. Remote-stat fallback only covers
+	// the brief window before the first sync; leaving it on permanently made
+	// every macOS junk-name probe (._*, .DS_Store, Finder, tab-completion) a
+	// synchronous WAN round trip. Missed watcher events are now repaired by the
+	// periodic tree refresh instead.
+	if b.synced.Load() || !b.source.Online() {
 		return Attr{Exists: false}, nil
 	}
 	st, err := b.source.Stat(ctx, rel)

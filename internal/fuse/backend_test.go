@@ -16,9 +16,10 @@ import (
 // fakeSource is an in-memory Source implementing SourceRPC. Writes are last-
 // write-wins (no conflict apparatus), matching the new model.
 type fakeSource struct {
-	mu     sync.Mutex
-	files  map[string]fakeFile
-	online bool
+	mu        sync.Mutex
+	files     map[string]fakeFile
+	online    bool
+	statCalls int // counts Stat RPCs (negative lookups must not hit the network post-sync)
 }
 
 type fakeFile struct {
@@ -49,6 +50,9 @@ func (s *fakeSource) Online() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.
 func (s *fakeSource) setOnline(v bool) { s.mu.Lock(); s.online = v; s.mu.Unlock() }
 
 func (s *fakeSource) Stat(_ context.Context, rel string) (proto.FileStat, error) {
+	s.mu.Lock()
+	s.statCalls++
+	s.mu.Unlock()
 	f, ok := s.get(rel)
 	if !ok {
 		return proto.FileStat{Rel: rel}, nil
@@ -166,6 +170,89 @@ func TestFullTreeReaddirAndAttr(t *testing.T) {
 	a, err := b.Getattr(context.Background(), "dir/b.txt")
 	if err != nil || !a.Exists || a.Size != int64(len("worldwide")) {
 		t.Fatalf("expected real size for unopened file, got %+v err=%v", a, err)
+	}
+}
+
+// Pre-sync, an index miss falls back to a remote Stat (covers the window before
+// the first tree sync); post-sync, the index is authoritative and a missing name
+// answers ENOENT locally — macOS probes junk names (._*, .DS_Store) constantly,
+// and each used to cost a WAN round trip.
+func TestGetattrNegativeIsLocalAfterSync(t *testing.T) {
+	b, src := harness(t)
+	src.put("real.txt", "hi")
+
+	// Before the first sync: fallback finds the file remotely.
+	a, err := b.Getattr(context.Background(), "real.txt")
+	if err != nil || !a.Exists {
+		t.Fatalf("pre-sync fallback should resolve real.txt: %+v err=%v", a, err)
+	}
+	if src.statCalls == 0 {
+		t.Fatal("pre-sync lookup should have used a remote Stat")
+	}
+
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	src.statCalls = 0
+
+	a, err = b.Getattr(context.Background(), "._junk-probe")
+	if err != nil || a.Exists {
+		t.Fatalf("missing name must be ENOENT: %+v err=%v", a, err)
+	}
+	if a, _ = b.Getattr(context.Background(), "real.txt"); !a.Exists {
+		t.Fatal("indexed file must still resolve")
+	}
+	if src.statCalls != 0 {
+		t.Fatalf("post-sync lookups must not Stat remotely (got %d calls)", src.statCalls)
+	}
+}
+
+// A periodic tree refresh must not clobber local truth that hasn't flushed yet:
+// an unflushed create stays visible, an unflushed delete stays deleted, and a
+// materialized file keeps its HaveContent flag.
+func TestTreeRefreshPreservesLocalState(t *testing.T) {
+	b, src := harness(t)
+	src.put("keep.txt", "content")
+	src.put("doomed.txt", "bye")
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Materialize keep.txt so HaveContent is set.
+	if _, err := b.Materialize(context.Background(), "keep.txt"); err != nil {
+		t.Fatal(err)
+	}
+	// Unflushed local create (flush worker not running in this harness).
+	cp := b.cachePath("local-new.txt")
+	if err := os.MkdirAll(filepath.Dir(cp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cp, []byte("draft"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordWrite("local-new.txt"); err != nil {
+		t.Fatal(err)
+	}
+	// Unflushed local delete of a file Source still has.
+	if err := b.RecordDelete("doomed.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Periodic refresh: Source tree still lacks local-new.txt and still has doomed.txt.
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if e, ok := b.index.Get("local-new.txt"); !ok {
+		t.Fatal("unflushed create vanished from the index on refresh")
+	} else if !e.HaveContent {
+		t.Fatal("unflushed create lost HaveContent on refresh")
+	}
+	if _, ok := b.index.Get("doomed.txt"); ok {
+		t.Fatal("unflushed delete was resurrected by refresh")
+	}
+	if e, ok := b.index.Get("keep.txt"); !ok || !e.HaveContent {
+		t.Fatalf("HaveContent not preserved across refresh: %+v ok=%v", e, ok)
 	}
 }
 

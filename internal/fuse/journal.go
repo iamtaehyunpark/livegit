@@ -155,6 +155,16 @@ func (j *Journal) PendingForDir(relDir string) bool {
 	return false
 }
 
+// PendingSnapshot returns a copy of all unflushed entries (oldest first). Used
+// by SyncTree to keep local-truth index entries alive across a tree Replace.
+func (j *Journal) PendingSnapshot() []JournalEntry {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	out := make([]JournalEntry, len(j.pending))
+	copy(out, j.pending)
+	return out
+}
+
 // PendingCount returns the number of unflushed entries (for `lg status`).
 func (j *Journal) PendingCount() int {
 	j.mu.Lock()

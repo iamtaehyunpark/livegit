@@ -56,13 +56,19 @@ func NewIndex(snapshotPath string) *Index {
 // callers re-add those via Put after a Replace if needed. Persists the snapshot.
 func (ix *Index) Replace(entries []proto.TreeEntry) {
 	ix.mu.Lock()
+	old := ix.entries // carry HaveContent across the rebuild (Replace now runs
+	// every treeRefreshInterval, not just on reconnect)
 	ix.entries = map[string]*Entry{}
 	ix.children = map[string]map[string]bool{}
 	for _, e := range entries {
-		ix.putLocked(&Entry{
+		ne := &Entry{
 			Rel: config.Rel(e.Rel), IsDir: e.IsDir, Size: e.Size,
 			ModTime: e.ModTime, Mode: e.Mode, Hash: e.Hash,
-		})
+		}
+		if prev, ok := old[ne.Rel]; ok {
+			ne.HaveContent = prev.HaveContent
+		}
+		ix.putLocked(ne)
 	}
 	ix.dirty = true
 	ix.mu.Unlock()
@@ -82,9 +88,12 @@ func (ix *Index) putLocked(e *Entry) {
 	if e.Rel == "" {
 		return
 	}
-	// Preserve a known HaveContent flag across metadata updates.
+	// Preserve a known HaveContent flag across metadata updates. Callers with
+	// the bytes Put HaveContent:true; metadata-only callers leave it false.
+	// Clearing is done explicitly via SetHaveContent, never via Put — so OR is
+	// right (copying prev unconditionally used to stomp Materialize's true).
 	if prev, ok := ix.entries[e.Rel]; ok {
-		e.HaveContent = prev.HaveContent
+		e.HaveContent = e.HaveContent || prev.HaveContent
 	}
 	ix.entries[e.Rel] = e
 	ix.ensureAncestors(e.Rel)

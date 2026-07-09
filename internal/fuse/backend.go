@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
@@ -40,8 +41,17 @@ type Backend struct {
 
 	testCapBytes int64 // test-only content-cache cap override (0 = use config GB)
 
+	// synced flips true after the first successful full-tree sync. From then on
+	// the index is authoritative for negatives: Getattr answers ENOENT locally
+	// instead of paying a per-lookup remote Stat (macOS probes nonexistent names
+	// — ._*, .DS_Store — constantly; each miss used to cost a WAN round trip).
+	synced atomic.Bool
+
 	stop chan struct{}
 }
+
+// TreeSynced reports whether a full-tree sync has completed this session.
+func (b *Backend) TreeSynced() bool { return b.synced.Load() }
 
 // capBytes is the content-cache size cap in bytes (tests can override it).
 func (b *Backend) capBytes() int64 {
@@ -90,29 +100,62 @@ func (b *Backend) SyncTree(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Local truth not yet on Source must survive the wholesale Replace: an entry
+	// with an unflushed journal write/create would vanish from the mount until
+	// its flush lands, and an unflushed delete would resurrect the remote copy.
+	pend := b.journal.PendingSnapshot()
+	kept := map[string]*Entry{}
+	for _, je := range pend {
+		if je.Op != OpDelete {
+			if e, ok := b.index.Get(je.Rel); ok {
+				kept[je.Rel] = e
+			}
+		}
+	}
 	b.index.Replace(entries)
-	b.log.Info("tree synced", "entries", len(entries))
+	for _, je := range pend {
+		if je.Op == OpDelete {
+			b.index.Remove(je.Rel)
+		} else if e := kept[je.Rel]; e != nil {
+			b.index.Put(e)
+		}
+	}
+	if b.synced.CompareAndSwap(false, true) {
+		b.log.Info("tree synced", "entries", len(entries))
+	} else {
+		// Periodic refresh — Debug so lg.log isn't a line-a-minute.
+		b.log.Debug("tree refreshed", "entries", len(entries))
+	}
 	return nil
 }
 
+// treeRefreshInterval is the periodic full re-sync cadence. The watcher's
+// invalidations keep the index current in real time; this is the backstop that
+// bounds staleness when pushes are lost (offline edits, inotify queue overflow,
+// the new-dir watch race) — it also replaced the old per-lookup remote-stat
+// fallback as the recovery path for missed events.
+const treeRefreshInterval = 60 * time.Second
+
 // RunTreeSync keeps the full-tree index eager: it syncs once the connection is
-// up and re-syncs on every reconnect (offline->online edge). Between syncs the
-// watcher's invalidations keep the index current.
+// up, re-syncs on every reconnect (offline->online edge), and refreshes every
+// treeRefreshInterval while online.
 func (b *Backend) RunTreeSync(ctx context.Context) {
 	wasOnline := false
+	var lastSync time.Time
 	for {
 		online := b.source.Online()
-		if online && !wasOnline {
+		if online && (!wasOnline || time.Since(lastSync) >= treeRefreshInterval) {
 			sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-			if err := b.SyncTree(sctx); err != nil {
-				b.log.Warn("tree sync failed", "err", err)
-			} else {
-				wasOnline = true
-			}
+			err := b.SyncTree(sctx)
 			cancel()
-		} else {
-			wasOnline = online
+			if err != nil {
+				b.log.Warn("tree sync failed", "err", err)
+				online = false // treat as an edge: retry every second until it lands
+			} else {
+				lastSync = time.Now()
+			}
 		}
+		wasOnline = online
 		select {
 		case <-ctx.Done():
 			return
