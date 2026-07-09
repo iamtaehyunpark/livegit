@@ -162,9 +162,37 @@ func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
 
 func (fs *FileServer) del(req proto.DelReq) (proto.DelAck, error) {
 	abs := fs.abs(req.Rel)
-	current, err := hashx.File(abs)
+	info, err := os.Lstat(abs)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return proto.DelAck{OK: true}, nil // already gone
+		}
 		return proto.DelAck{}, err
+	}
+
+	if info.IsDir() {
+		// Journaled rmdir. Directories have no content hash, so skip the
+		// conflict check (hashing a dir errors with EISDIR — that used to fail
+		// the RPC forever and block the whole flush queue behind it). The dir
+		// should be empty by now (children are earlier journal entries); if
+		// Source still holds files Ghost never saw (e.g. ignored paths), keep
+		// the dir and report a conflict ack — Ghost drops the entry and the
+		// next tree sync resurfaces the dir, instead of wedging the queue.
+		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+			fs.log.Warn("dir delete skipped", "rel", req.Rel, "err", err)
+			return proto.DelAck{OK: false, Conflict: true,
+				Message: "directory not removed: " + err.Error()}, nil
+		}
+		return proto.DelAck{OK: true}, nil
+	}
+
+	// Only regular files have a meaningful content hash; for symlinks/fifos
+	// just remove (hashing would follow the link or block).
+	current := ""
+	if info.Mode().IsRegular() {
+		if current, err = hashx.File(abs); err != nil {
+			return proto.DelAck{}, err
+		}
 	}
 	if current != "" && req.BaseHash != "" && current != req.BaseHash {
 		// Source changed since the delete was journaled; surface as a conflict

@@ -13,6 +13,12 @@ import (
 // single write path for both online and offline: online it flushes
 // within ms; offline it parks until the journal is woken on reconnect.
 func (b *Backend) RunFlush(ctx context.Context) {
+	// Track consecutive failures of the head entry: the queue drains oldest-
+	// first, so a persistently failing head blocks everything behind it.
+	// Surface that at Warn (once, to avoid a line every 2s) instead of only
+	// Debug — a wedged journal was invisible in lg.log at INFO.
+	var failSeq uint64
+	failCount := 0
 	for {
 		// Drain everything currently flushable.
 		for {
@@ -24,8 +30,20 @@ func (b *Backend) RunFlush(ctx context.Context) {
 				break // park; reconnect will Wake the journal
 			}
 			if err := b.flushEntry(ctx, e); err != nil {
-				b.log.Debug("flush deferred", "rel", e.Rel, "err", err)
+				if e.Seq != failSeq {
+					failSeq, failCount = e.Seq, 0
+				}
+				failCount++
+				if failCount == 5 {
+					b.log.Warn("flush stuck: entry keeps failing and blocks the queue",
+						"rel", e.Rel, "op", e.Op, "attempts", failCount, "err", err)
+				} else {
+					b.log.Debug("flush deferred", "rel", e.Rel, "err", err)
+				}
 				break // transient (e.g. dropped mid-flush); retry on next wake
+			}
+			if e.Seq == failSeq {
+				failSeq, failCount = 0, 0 // head recovered
 			}
 		}
 		select {
@@ -48,8 +66,16 @@ func (b *Backend) flushEntry(ctx context.Context, e JournalEntry) error {
 	switch e.Op {
 	case OpDelete:
 		// Last-write-wins: empty BaseHash means Source just removes it.
-		if _, err := b.source.Delete(ctx, proto.DelReq{Rel: e.Rel, BaseHash: e.BaseHash}); err != nil {
+		ack, err := b.source.Delete(ctx, proto.DelReq{Rel: e.Rel, BaseHash: e.BaseHash})
+		if err != nil {
 			return err
+		}
+		if !ack.OK {
+			// Source declined (e.g. changed since journaled, or dir not empty
+			// there). Drop the entry — the next tree sync re-shows the path —
+			// but say so; silently keeping it would wedge the queue forever.
+			b.log.Warn("delete not applied on source, dropping journal entry",
+				"rel", e.Rel, "msg", ack.Message)
 		}
 		return b.journal.Ack(e.Seq)
 
