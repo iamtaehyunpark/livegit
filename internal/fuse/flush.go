@@ -64,6 +64,14 @@ func (b *Backend) flushEntry(ctx context.Context, e JournalEntry) error {
 		return b.journal.Ack(e.Seq)
 	}
 	switch e.Op {
+	case OpMkdir:
+		if _, err := b.source.Write(ctx, proto.WriteReq{
+			Rel: e.Rel, IsDir: true, Mode: e.Mode, ModTime: e.ModTime,
+		}); err != nil {
+			return err
+		}
+		return b.journal.Ack(e.Seq)
+
 	case OpDelete:
 		// Last-write-wins: empty BaseHash means Source just removes it.
 		ack, err := b.source.Delete(ctx, proto.DelReq{Rel: e.Rel, BaseHash: e.BaseHash})

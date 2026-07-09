@@ -26,6 +26,7 @@ type fakeFile struct {
 	content []byte
 	mode    uint32
 	mod     int64
+	isDir   bool
 }
 
 func newFakeSource() *fakeSource {
@@ -73,6 +74,10 @@ func (s *fakeSource) Read(_ context.Context, rel string) (proto.ReadResp, error)
 func (s *fakeSource) Write(_ context.Context, req proto.WriteReq) (proto.WriteAck, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if req.IsDir {
+		s.files[req.Rel] = fakeFile{mode: req.Mode, mod: req.ModTime, isDir: true}
+		return proto.WriteAck{OK: true}, nil
+	}
 	s.files[req.Rel] = fakeFile{content: req.Content, mode: req.Mode, mod: req.ModTime}
 	return proto.WriteAck{OK: true, NewHash: hashx.Bytes(req.Content), SourceMod: req.ModTime}, nil
 }
@@ -90,7 +95,7 @@ func (s *fakeSource) Tree(_ context.Context) ([]proto.TreeEntry, error) {
 	var out []proto.TreeEntry
 	for rel, f := range s.files {
 		out = append(out, proto.TreeEntry{
-			Rel: rel, Size: int64(len(f.content)), ModTime: f.mod,
+			Rel: rel, IsDir: f.isDir, Size: int64(len(f.content)), ModTime: f.mod,
 			Mode: f.mode, Hash: hashx.Bytes(f.content),
 		})
 	}
@@ -253,6 +258,126 @@ func TestTreeRefreshPreservesLocalState(t *testing.T) {
 	}
 	if e, ok := b.index.Get("keep.txt"); !ok || !e.HaveContent {
 		t.Fatalf("HaveContent not preserved across refresh: %+v ok=%v", e, ok)
+	}
+}
+
+// A local mkdir must be journaled and pushed, and must survive a tree refresh
+// both before its flush (kept as pending local truth) and after it (present in
+// Source's tree). Before OpMkdir existed, an empty dir lived only in the index
+// and every tree sync erased it from the mount.
+func TestMkdirSyncsAndSurvivesRefresh(t *testing.T) {
+	b, src := harness(t)
+	src.put("existing.txt", "x")
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	b.markDir("newdir", 0o755)
+	if e, ok := b.index.Get("newdir"); !ok || !e.IsDir {
+		t.Fatalf("mkdir not indexed: %+v ok=%v", e, ok)
+	}
+	if b.journal.PendingCount() != 1 {
+		t.Fatalf("mkdir not journaled: %d pending", b.journal.PendingCount())
+	}
+
+	// Refresh BEFORE the flush: the pending mkdir keeps the dir alive.
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.index.Get("newdir"); !ok {
+		t.Fatal("unflushed mkdir vanished on refresh")
+	}
+
+	// Flush: Source gains the directory.
+	e, _ := b.journal.Peek()
+	if err := b.flushEntry(context.Background(), e); err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := src.get("newdir"); !ok || !f.isDir {
+		t.Fatalf("mkdir not pushed to source: %+v ok=%v", f, ok)
+	}
+
+	// Refresh AFTER the flush: the dir now comes from Source's tree.
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := b.index.Get("newdir"); !ok || !e.IsDir {
+		t.Fatal("flushed mkdir vanished on refresh")
+	}
+}
+
+// The periodic refresh is the backstop for LOST watcher pushes — including
+// content: a file changed on Source (no invalidate received) with cached local
+// bytes must have its cache dropped so the next open refetches.
+func TestRefreshRepairsStaleContent(t *testing.T) {
+	b, src := harness(t)
+	src.put("data.txt", "v1")
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cp, err := b.Materialize(context.Background(), "data.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(cp); string(got) != "v1" {
+		t.Fatalf("cached=%q", got)
+	}
+
+	// Source changes with NO invalidate push (simulated lost watcher event).
+	src.mu.Lock()
+	src.files["data.txt"] = fakeFile{content: []byte("v2-longer"), mode: 0o644,
+		mod: time.Now().Unix() + 10}
+	src.mu.Unlock()
+
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cacheFileExists(cp) {
+		t.Fatal("stale cache not dropped by refresh")
+	}
+	cp2, err := b.Materialize(context.Background(), "data.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(cp2); string(got) != "v2-longer" {
+		t.Fatalf("refetched=%q, want v2-longer", got)
+	}
+
+	// And the guard: a pending local edit is NOT clobbered by the repair.
+	if err := os.WriteFile(cp2, []byte("local-edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordWrite("data.txt"); err != nil {
+		t.Fatal(err)
+	}
+	src.mu.Lock()
+	src.files["data.txt"] = fakeFile{content: []byte("v3"), mode: 0o644,
+		mod: time.Now().Unix() + 20}
+	src.mu.Unlock()
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(cp2); string(got) != "local-edit" {
+		t.Fatalf("pending local edit clobbered: %q", got)
+	}
+}
+
+// An empty tree response for a populated index (Source-side walk failure) must
+// not wipe the local view.
+func TestEmptyTreeDoesNotWipeIndex(t *testing.T) {
+	b, src := harness(t)
+	src.put("a.txt", "x")
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	src.mu.Lock()
+	src.files = map[string]fakeFile{}
+	src.mu.Unlock()
+	if err := b.SyncTree(context.Background()); err == nil {
+		t.Fatal("expected error for empty tree with populated index")
+	}
+	if _, ok := b.index.Get("a.txt"); !ok {
+		t.Fatal("index wiped by empty tree response")
 	}
 }
 

@@ -14,6 +14,7 @@ const (
 	OpWrite  JournalOp = "write"
 	OpDelete JournalOp = "delete"
 	OpCreate JournalOp = "create"
+	OpMkdir  JournalOp = "mkdir" // directory create; flushed as WriteReq{IsDir}
 )
 
 // JournalEntry is one record. Content is not stored inline: it is read

@@ -120,6 +120,19 @@ func (fs *FileServer) read(rel string) (proto.ReadResp, error) {
 // the two sides diverged — back up Source's current version before overwriting.
 func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
 	abs := fs.abs(req.Rel)
+	if req.IsDir {
+		// Journaled mkdir: empty directories sync too (before this, a local
+		// mkdir only existed in Ghost's index and vanished on the next tree
+		// sync). No content, no conflict check — mkdir is idempotent.
+		perm := os.FileMode(req.Mode & 0o777)
+		if perm == 0 {
+			perm = 0o755
+		}
+		if err := os.MkdirAll(abs, perm); err != nil {
+			return proto.WriteAck{}, err
+		}
+		return proto.WriteAck{OK: true}, nil
+	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return proto.WriteAck{}, err
 	}

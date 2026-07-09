@@ -6,7 +6,9 @@
 package fuse
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"hash/fnv"
 	"os"
 	"path"
 	"sort"
@@ -38,6 +40,7 @@ type Index struct {
 	children map[string]map[string]bool // parent rel -> set of child rels
 	path     string                     // snapshot file
 	dirty    bool
+	lastFP   uint64 // fingerprint of the last Replace'd tree (skip no-op saves)
 }
 
 // NewIndex creates an index and loads the on-disk snapshot if present.
@@ -55,6 +58,10 @@ func NewIndex(snapshotPath string) *Index {
 // locally-created entries not yet on Source are preserved if still in the cache;
 // callers re-add those via Put after a Replace if needed. Persists the snapshot.
 func (ix *Index) Replace(entries []proto.TreeEntry) {
+	h := fnv.New64a()
+	var num [8]byte
+	hashNum := func(v uint64) { binary.LittleEndian.PutUint64(num[:], v); h.Write(num[:]) }
+
 	ix.mu.Lock()
 	old := ix.entries // carry HaveContent across the rebuild (Replace now runs
 	// every treeRefreshInterval, not just on reconnect)
@@ -69,8 +76,23 @@ func (ix *Index) Replace(entries []proto.TreeEntry) {
 			ne.HaveContent = prev.HaveContent
 		}
 		ix.putLocked(ne)
+		h.Write([]byte(ne.Rel))
+		flags := byte(0)
+		if ne.IsDir {
+			flags = 1
+		}
+		h.Write([]byte{0, flags}) // 0-separator so "a"+"bc" != "ab"+"c"
+		hashNum(uint64(ne.Size))
+		hashNum(uint64(ne.ModTime))
+		hashNum(uint64(ne.Mode))
 	}
-	ix.dirty = true
+	// Only mark dirty when the tree actually changed: the periodic refresh runs
+	// once a minute, and rewriting a multi-MB tree.json for an identical tree is
+	// pure disk churn.
+	if fp := h.Sum64(); fp != ix.lastFP {
+		ix.lastFP = fp
+		ix.dirty = true
+	}
 	ix.mu.Unlock()
 	ix.SaveSnapshot()
 }

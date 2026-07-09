@@ -103,6 +103,7 @@ type WriteReq struct {
 	BaseHash string
 	ModTime  int64
 	Mode     uint32
+	IsDir    bool // mkdir: create the directory (Content/BaseHash unused)
 }
 type WriteAck struct {
 	OK        bool

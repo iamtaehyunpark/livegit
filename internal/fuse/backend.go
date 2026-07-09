@@ -50,9 +50,6 @@ type Backend struct {
 	stop chan struct{}
 }
 
-// TreeSynced reports whether a full-tree sync has completed this session.
-func (b *Backend) TreeSynced() bool { return b.synced.Load() }
-
 // capBytes is the content-cache size cap in bytes (tests can override it).
 func (b *Backend) capBytes() int64 {
 	if b.testCapBytes > 0 {
@@ -96,14 +93,27 @@ func (b *Backend) SyncTree(ctx context.Context) error {
 	if !b.source.Online() {
 		return fmt.Errorf("offline")
 	}
+	// Snapshot pending BEFORE the fetch as well as after: an entry that flushes
+	// while Tree() is in flight (say a delete) is gone from the post-fetch
+	// snapshot but still present in the fetched tree — without the union it
+	// would be resurrected from the stale tree until the next refresh.
+	pend := b.journal.PendingSnapshot()
 	entries, err := b.source.Tree(ctx)
 	if err != nil {
 		return err
 	}
+	pend = append(pend, b.journal.PendingSnapshot()...)
+
+	// A walk that returned nothing for a populated index is a Source-side
+	// failure (tree() skips unreadable paths silently), not a real empty repo —
+	// wiping the local view would be worse than staying stale. Retry next tick.
+	if len(entries) == 0 && b.index.Len() > 0 {
+		return fmt.Errorf("empty tree for a non-empty index; keeping local view")
+	}
+
 	// Local truth not yet on Source must survive the wholesale Replace: an entry
-	// with an unflushed journal write/create would vanish from the mount until
-	// its flush lands, and an unflushed delete would resurrect the remote copy.
-	pend := b.journal.PendingSnapshot()
+	// with an unflushed write/create/mkdir would vanish from the mount until its
+	// flush lands, and an unflushed delete would resurrect the remote copy.
 	kept := map[string]*Entry{}
 	for _, je := range pend {
 		if je.Op != OpDelete {
@@ -112,6 +122,25 @@ func (b *Backend) SyncTree(ctx context.Context) error {
 			}
 		}
 	}
+
+	// Content backstop: repairing lost watcher pushes includes *content*. A file
+	// whose size/mtime changed on Source while we hold cached bytes (and no
+	// unflushed local edit) gets its cache dropped so the next open refetches —
+	// Invalidate's policy, keyed on size/mtime because tree entries carry no
+	// hash. No self-echo: the agent applies our pushed ModTime on flush, so a
+	// flushed local edit compares equal.
+	var stale []string
+	for _, e := range entries {
+		if e.IsDir {
+			continue
+		}
+		rel := config.Rel(e.Rel)
+		if old, ok := b.index.Get(rel); ok && old.HaveContent &&
+			(old.Size != e.Size || old.ModTime != e.ModTime) && !b.journal.HasPending(rel) {
+			stale = append(stale, rel)
+		}
+	}
+
 	b.index.Replace(entries)
 	for _, je := range pend {
 		if je.Op == OpDelete {
@@ -120,6 +149,12 @@ func (b *Backend) SyncTree(ctx context.Context) error {
 			b.index.Put(e)
 		}
 	}
+	for _, rel := range stale {
+		_ = os.Remove(b.cachePath(rel))
+		b.index.SetHaveContent(rel, false)
+		b.log.Debug("refresh dropped stale cached content", "rel", rel)
+	}
+
 	if b.synced.CompareAndSwap(false, true) {
 		b.log.Info("tree synced", "entries", len(entries))
 	} else {
@@ -137,25 +172,36 @@ func (b *Backend) SyncTree(ctx context.Context) error {
 const treeRefreshInterval = 60 * time.Second
 
 // RunTreeSync keeps the full-tree index eager: it syncs once the connection is
-// up, re-syncs on every reconnect (offline->online edge), and refreshes every
-// treeRefreshInterval while online.
+// up, re-syncs on every reconnect, and refreshes periodically while online.
+// One field carries all the state: a zero lastSync means "sync ASAP" (startup
+// and reconnect), a failed sync leaves it unadvanced so the next tick retries.
 func (b *Backend) RunTreeSync(ctx context.Context) {
-	wasOnline := false
 	var lastSync time.Time
+	interval := treeRefreshInterval
 	for {
-		online := b.source.Online()
-		if online && (!wasOnline || time.Since(lastSync) >= treeRefreshInterval) {
+		if !b.source.Online() {
+			lastSync = time.Time{} // offline: re-sync immediately on reconnect
+		} else if time.Since(lastSync) >= interval {
 			sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			start := time.Now()
 			err := b.SyncTree(sctx)
 			cancel()
 			if err != nil {
 				b.log.Warn("tree sync failed", "err", err)
-				online = false // treat as an edge: retry every second until it lands
 			} else {
 				lastSync = time.Now()
+				// Adaptive cadence: a full walk of a huge tree must not dominate
+				// Source (a 30s walk every 60s is a 50% duty cycle). Cap the
+				// refresh at ~10% duty, clamped to [treeRefreshInterval, 10m].
+				interval = 10 * time.Since(start)
+				if interval < treeRefreshInterval {
+					interval = treeRefreshInterval
+				}
+				if interval > 10*time.Minute {
+					interval = 10 * time.Minute
+				}
 			}
 		}
-		wasOnline = online
 		select {
 		case <-ctx.Done():
 			return
@@ -280,13 +326,25 @@ func (b *Backend) markLiveNew(rel string, mode uint32) error {
 	return nil
 }
 
-// markDir registers a locally-created directory in the index.
+// markDir registers a locally-created directory in the index AND journals a
+// mkdir push. Without the journal entry an empty dir existed only in Ghost's
+// index — never on Source — so every tree sync erased it from the mount.
 func (b *Backend) markDir(rel string, mode uint32) {
+	rel = config.Rel(rel)
+	if b.ignored(rel) {
+		return
+	}
 	perm := mode & 0o777
 	if perm == 0 {
 		perm = 0o755
 	}
-	b.index.Put(&Entry{Rel: config.Rel(rel), IsDir: true, Mode: perm, ModTime: time.Now().Unix()})
+	now := time.Now()
+	b.index.Put(&Entry{Rel: rel, IsDir: true, Mode: perm, ModTime: now.Unix()})
+	if _, err := b.journal.Append(JournalEntry{
+		Rel: rel, Op: OpMkdir, ModTime: now.Unix(), Mode: perm, Ts: now.Unix(),
+	}); err != nil {
+		b.log.Warn("mkdir journal append failed", "rel", rel, "err", err)
+	}
 }
 
 // RecordRename moves oldRel to newRel through the journal (last-write-wins).
