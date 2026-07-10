@@ -21,17 +21,18 @@ func newUnmountCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			mp := c.MountDir()
 			// Idempotent: nothing mounted is the goal state, not an error. A
 			// STALE mount (dead holder) still needs the force path though, and
 			// IsMounted can't see one (its stat fails), so check separately.
-			if !fuse.IsMounted(c.LocalRoot) && !fuse.IsStaleMount(c.LocalRoot) {
-				fmt.Printf("nothing mounted at %s\n", c.LocalRoot)
+			if !fuse.IsMounted(mp) && !fuse.IsStaleMount(mp) {
+				fmt.Printf("nothing mounted at %s\n", mp)
 				return nil
 			}
-			if err := fuse.ForceUnmount(c.LocalRoot); err != nil {
-				return fmt.Errorf("unmount %s failed: %w", c.LocalRoot, err)
+			if err := fuse.ForceUnmount(mp); err != nil {
+				return fmt.Errorf("unmount %s failed: %w", mp, err)
 			}
-			fmt.Fprintf(os.Stdout, "unmounted %s\n", c.LocalRoot)
+			fmt.Fprintf(os.Stdout, "unmounted %s\n", mp)
 			return nil
 		},
 	}

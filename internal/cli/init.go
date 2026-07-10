@@ -181,6 +181,10 @@ func runWizard(in *wizardInput) error {
 // mountFor is the local mount point for a project: a sibling of `.lg/` named
 // exactly after the Source repo (basename of remote_root). There is no choice
 // here — the local mirror always carries the repo's own name.
+// mountFor is init-time twin of config.MountDir: the same sibling-of-.lg
+// derivation, but anchored on InitDir (project discovery can't run before the
+// .lg dir exists). Used only for display and to pre-create the mount dir —
+// the path itself is never written to the config.
 func mountFor(remoteRoot string) string {
 	name := filepath.Base(strings.TrimRight(remoteRoot, "/"))
 	return filepath.Join(filepath.Dir(config.InitDir()), name)
@@ -213,10 +217,11 @@ func writeConfig(in *wizardInput, skipConfirm bool) error {
 		// doesn't hold an authenticated session open indefinitely.
 		c.Source.ControlPersist = "10h"
 	}
-	if config.Role(in.role) == config.RoleGhost {
-		// Mount dir is always named after the Source repo (no selection).
-		c.LocalRoot = mountFor(c.Source.RemoteRoot)
-	}
+	// local_root is deliberately NOT written: the mountpoint is derived at
+	// runtime (config.MountDir — a sibling of .lg/ named after the Source
+	// repo), so moving the project later moves the mount with it. Writing an
+	// absolute path here is what used to strand the mount at the init-time
+	// location. `lg config set local_root <path>` still pins one explicitly.
 
 	// Sensible defaults so a fresh config is immediately usable.
 	c.Ignore = []string{".DS_Store", ".venv/", "node_modules/", "*.pt"}
@@ -251,7 +256,7 @@ func writeConfig(in *wizardInput, skipConfirm bool) error {
 	}
 	if c.Role == config.RoleGhost {
 		_ = os.MkdirAll(filepath.Join(initDir, "cache"), 0o755)
-		_ = os.MkdirAll(c.LocalRoot, 0o755)
+		_ = os.MkdirAll(mountFor(c.Source.RemoteRoot), 0o755)
 	}
 	if err := c.SaveTo(cfgPath); err != nil {
 		return err
@@ -333,7 +338,7 @@ func printSummary(c *config.Config) {
 	if c.Role == config.RoleGhost {
 		fmt.Printf("  server:      %s\n", sshTarget(c))
 		fmt.Printf("  remote repo: %s\n", c.Source.RemoteRoot)
-		fmt.Printf("  local mount: %s\n", c.LocalRoot)
+		fmt.Printf("  local mount: %s\n", mountFor(c.Source.RemoteRoot))
 		switch {
 		case c.Source.Auth == "password" && c.Source.SSHMode == "native":
 			fmt.Printf("  auth:        password (stored encrypted, native ssh)\n")

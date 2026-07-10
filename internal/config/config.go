@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -57,7 +58,12 @@ type Config struct {
 		ControlPersist string `yaml:"control_persist"`
 	} `yaml:"source"`
 
-	LocalRoot string `yaml:"local_root"` // absolute path of the FUSE mount on Ghost
+	// LocalRoot optionally PINS the FUSE mountpoint to an absolute path. Leave
+	// it empty (the default since v1.3.5) and the mountpoint is derived fresh
+	// each run via MountDir() — <project>/<basename(remote_root)> — so moving
+	// the project moves the mount with it. Older configs with a stored path
+	// keep working (the pin wins).
+	LocalRoot string `yaml:"local_root"`
 
 	Ignore []string `yaml:"ignore"` // .gitignore-style patterns (also merged with .lgignore)
 
@@ -243,10 +249,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("role must be 'ghost' or 'source', got %q", c.Role)
 	}
 	if c.Role == RoleGhost {
-		if c.LocalRoot == "" {
-			return fmt.Errorf("ghost role requires local_root")
-		}
-		if !filepath.IsAbs(c.LocalRoot) {
+		// Empty is valid: the mountpoint is then derived at runtime (MountDir).
+		if c.LocalRoot != "" && !filepath.IsAbs(c.LocalRoot) {
 			return fmt.Errorf("local_root must be absolute: %q", c.LocalRoot)
 		}
 		if c.Source.Host == "" {
@@ -257,6 +261,20 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// MountDir returns where the remote tree mounts on Ghost. With local_root
+// unset (the default) it is derived from the project's CURRENT location —
+// a sibling of .lg/ named after the Source repo — so moving the project
+// moves the mount with it, instead of lg faithfully mounting at a path
+// frozen at init time. A non-empty local_root (older configs, or an explicit
+// `lg config set local_root`) pins the mountpoint and wins.
+func (c *Config) MountDir() string {
+	if c.LocalRoot != "" {
+		return filepath.Clean(c.LocalRoot)
+	}
+	name := filepath.Base(strings.TrimRight(c.Source.RemoteRoot, "/"))
+	return filepath.Join(filepath.Dir(Dir()), name)
 }
 
 // Save writes the config to the default path, creating ~/.lg if needed.

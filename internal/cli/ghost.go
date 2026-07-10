@@ -91,5 +91,5 @@ func openGhostJournal() (*fuse.Journal, error) {
 // buildMatcher loads ignore patterns from config + ~/.lg or repo .lgignore.
 func buildMatcher(c *config.Config) (*config.Matcher, error) {
 	// .lgignore lives at the mount root; merge with config.ignore.
-	return config.LoadIgnoreFile(c.Ignore, c.LocalRoot+"/.lgignore")
+	return config.LoadIgnoreFile(c.Ignore, c.MountDir()+"/.lgignore")
 }

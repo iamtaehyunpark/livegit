@@ -5,8 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -53,10 +51,10 @@ func startMountDaemon() error {
 	if err != nil {
 		return err
 	}
-	if c.LocalRoot == "" { // same fallback as setupProjectMount
-		name := filepath.Base(strings.TrimRight(c.Source.RemoteRoot, "/"))
-		c.LocalRoot = filepath.Join(filepath.Dir(config.Dir()), name)
-	}
+	// Same in-memory mountpoint resolution as setupProjectMount (the holder it
+	// spawns re-resolves for itself; identical inputs give an identical path).
+	c.LocalRoot = c.MountDir()
+	_ = os.MkdirAll(c.LocalRoot, 0o755)
 
 	// Idempotent: a live mount (ours or an lg shell's) is already the goal state.
 	if fuse.IsMounted(c.LocalRoot) {

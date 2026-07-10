@@ -24,10 +24,11 @@ func newStatusCmd() *cobra.Command {
 			}
 			fmt.Printf("role:        %s\n", c.Role)
 			if c.Role == config.RoleGhost {
-				if fuse.IsMounted(c.LocalRoot) {
-					fmt.Printf("mount:       %s (live — browse/edit it directly)\n", c.LocalRoot)
+				mp := c.MountDir()
+				if fuse.IsMounted(mp) {
+					fmt.Printf("mount:       %s (live — browse/edit it directly)\n", mp)
 				} else {
-					fmt.Printf("mount:       %s (not mounted — `lg mount` or `lg shell` to browse/edit)\n", c.LocalRoot)
+					fmt.Printf("mount:       %s (not mounted — `lg mount` or `lg shell` to browse/edit)\n", mp)
 				}
 				fmt.Printf("source:      %s:%s\n", c.Source.Host, c.Source.RemoteRoot)
 

@@ -22,7 +22,7 @@ type PathMapper struct {
 // NewPathMapper builds a mapper from a config.
 func NewPathMapper(c *Config) *PathMapper {
 	return &PathMapper{
-		localRoot:  filepath.Clean(c.LocalRoot),
+		localRoot:  c.MountDir(), // pinned local_root, or derived from the project location
 		remoteRoot: cleanSlash(c.Source.RemoteRoot),
 	}
 }

@@ -86,12 +86,14 @@ func runShell() error {
 // mount until unmounted). The returned cleanup is idempotent and safe to call
 // from a signal handler: unmount, then close the client and journal.
 func setupProjectMount(c *config.Config) (mount *fuse.Mount, cleanup func(), logPath string, err error) {
-	// Fallback for older configs without a mount point: a sibling of .lg/ named
-	// after the Source repo (basename of remote_root).
-	if c.LocalRoot == "" {
-		name := filepath.Base(strings.TrimRight(c.Source.RemoteRoot, "/"))
-		c.LocalRoot = filepath.Join(filepath.Dir(config.Dir()), name)
-	}
+	// Resolve the mountpoint (pinned local_root, or derived from the project's
+	// current location) once, in memory, so the rest of this function and its
+	// callers read c.LocalRoot directly. Nothing on this path saves the config
+	// back, so a derived path is never frozen into the file. The MkdirAll
+	// covers a moved project, whose sibling mount dir doesn't exist yet at the
+	// new location.
+	c.LocalRoot = c.MountDir()
+	_ = os.MkdirAll(c.LocalRoot, 0o755)
 
 	// On a Duo/2FA host, authenticate before mounting so the (single) prompt is
 	// clean and up front, not buried under FUSE/connection noise — and so the
@@ -230,7 +232,7 @@ source %q
 }
 
 func projectID(c *config.Config) string {
-	return filepath.Base(strings.TrimRight(c.LocalRoot, "/"))
+	return filepath.Base(strings.TrimRight(c.MountDir(), "/"))
 }
 
 func genTabID() (string, error) {
