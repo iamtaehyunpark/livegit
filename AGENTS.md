@@ -176,10 +176,12 @@ lg jobs rm <id>                               # forget a finished job + its logs
 ```
 
 Jobs run on the server under `systemd --user`, so they survive your disconnect,
-your laptop sleeping, even the connection window expiring. (Where systemd isn't
-available lg falls back to `nohup` and *tells you* durability needs
-`loginctl enable-linger` — surface that warning to the human.) Exit codes are
-recorded: `lg jobs` shows `done(0)` / `done(1)`.
+your laptop sleeping, even the connection window expiring. lg also switches on
+`loginctl` lingering for the user when it's off — without it the server reaps
+every background unit once the last ssh session ends. (Where systemd or
+lingering isn't available lg falls back / warns — surface any start-time
+warning to the human.) Exit codes are recorded: `lg jobs` shows `done(0)` /
+`done(1)`.
 
 Pattern for an agent: start the job detached, poll `lg jobs` / tail
 `lg logs <id>` between other work, report the exit code when it lands.

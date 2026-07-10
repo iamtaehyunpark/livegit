@@ -156,6 +156,15 @@ scope. Design (`internal/agent/jobs.go`):
   durable; this is reported to the user as a warning). The agent sets
   `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` to `/run/user/<uid>` when missing
   so `systemctl --user` is reachable from a non-interactive ssh exec.
+- **Lingering is the second durability condition**: `systemd-run --user` only
+  escapes the *session* scope — with `Linger=no`, logind stops the whole
+  `user@UID.service` (and every lg job under it) the moment the user's last
+  session ends (e.g. lg's cached connection dropping). Found live 2026-07-10:
+  a 40-min job on galaxy-05 died this way. `start()` now runs `ensureLinger()`:
+  checks `loginctl show-user`, auto-enables lingering when off (self-linger
+  needs no root under systemd's default polkit policy), and warns via
+  `JobStartResp.Warn` when it can't. `lg jobs` prints a diagnosis hint when any
+  job shows `dead`. Lingering is per-machine (NOT shared via NFS home).
 - Wire protocol: `TypeJobStart/List/Act` RPCs on the **control stream** (like
   ping); log tailing on a dedicated `StreamJobLog` stream (like the PTY data
   stream — first line is a JSON `JobLogReq`).

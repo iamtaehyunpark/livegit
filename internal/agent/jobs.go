@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -41,6 +42,14 @@ import (
 // session scope and so needs `loginctl enable-linger` to be durable (surfaced
 // to the user as a warning).
 //
+// One more durability condition: user@UID.service itself only outlives the
+// user's sessions when LINGERING is on. With Linger=no, logind stops the whole
+// user manager — and every lg job under it — the moment the last login session
+// ends (e.g. the ghost's cached ssh connection dropping overnight). start()
+// therefore checks lingering and enables it when off (systemd's default polkit
+// policy allows users to linger themselves); if it can't, the user gets a
+// warning that the job's lifetime is tied to their sessions.
+//
 // State is deliberately NOT held in the agent process: each `lg run --detach`
 // spawns a fresh, short-lived agent that launches the job and dies. Liveness is
 // therefore owned by systemd (or the recorded pid), and identity/logs by an
@@ -55,8 +64,13 @@ type jobManager struct {
 	sdOK   bool
 	sdEnv  []string
 
+	lingerOnce sync.Once
+	lingerMsg  string
+	lingerBin  string // "loginctl"; tests point it at a fake
+
 	// forceNohup skips the systemd path (tests, so they don't create real
-	// transient user units on a systemd host).
+	// transient user units on a systemd host). It also skips the linger
+	// check/enable, which would mutate real logind state on a dev machine.
 	forceNohup bool
 }
 
@@ -74,7 +88,7 @@ type jobMeta struct {
 }
 
 func newJobManager(dir, remoteRoot string) *jobManager {
-	return &jobManager{dir: dir, remoteRoot: remoteRoot}
+	return &jobManager{dir: dir, remoteRoot: remoteRoot, lingerBin: "loginctl"}
 }
 
 // defaultJobsDir is ~/.lg/jobs on Source. Jobs are per-user (not per-project):
@@ -127,6 +141,14 @@ func (m *jobManager) start(cmdLine, relCwd string) (proto.JobInfo, string, error
 	meta := jobMeta{ID: id, Cmd: cmdLine, Started: time.Now().Unix()}
 	var warn string
 
+	// Durability precondition, checked before any launch mode: without
+	// lingering, everything under user@UID.service (systemd jobs) and the
+	// session scopes (nohup jobs) dies when the user's last session ends.
+	var lingerNote string
+	if !m.forceNohup {
+		lingerNote = m.ensureLinger()
+	}
+
 	if !m.forceNohup && m.systemdOK() {
 		unit := "lg-job-" + id
 		c := exec.Command("systemd-run", "--user", "--quiet",
@@ -155,8 +177,62 @@ func (m *jobManager) start(cmdLine, relCwd string) (proto.JobInfo, string, error
 	if err := m.writeMeta(meta); err != nil {
 		log.Warn("could not persist job meta", "id", id, "err", err)
 	}
+	warn = joinNotes(warn, lingerNote)
 	log.Info("detached job started", "id", id, "mode", meta.Mode, "cmd", truncate(cmdLine, 80))
 	return proto.JobInfo{ID: id, Cmd: cmdLine, State: "running", Started: meta.Started, Mode: meta.Mode}, warn, nil
+}
+
+// ensureLinger checks that the user lingers (once per agent) and turns it on
+// when off — the difference between a detached job that truly survives the
+// ghost disconnecting and one that dies with the last ssh session (see the
+// package comment). Returns "" when lingering is already on or the host has no
+// logind; otherwise a note (enabled it) or a warning (couldn't) for the user.
+func (m *jobManager) ensureLinger() string {
+	m.lingerOnce.Do(func() {
+		usr := lingerUser()
+		state := func() string {
+			out, err := exec.Command(m.lingerBin, "show-user", usr, "--property=Linger", "--value").Output()
+			if err != nil {
+				return "" // no logind / loginctl (e.g. non-systemd host): nothing to assess
+			}
+			return strings.TrimSpace(string(out))
+		}
+		if s := state(); s != "no" {
+			return // already lingering ("yes"), or unknowable — stay quiet
+		}
+		// Off: enable it. systemd's default polkit policy (set-self-linger)
+		// lets a user do this for themselves without root.
+		if exec.Command(m.lingerBin, "enable-linger", usr).Run() == nil && state() == "yes" {
+			logx.For("jobs").Info("enabled lingering so detached jobs survive disconnects", "user", usr)
+			m.lingerMsg = "enabled `loginctl` lingering on Source so this job survives your sessions closing"
+			return
+		}
+		m.lingerMsg = "lingering is off for " + usr + " on Source and lg could not enable it — " +
+			"this job dies when your last ssh session there ends; run `loginctl enable-linger " +
+			usr + "` on Source (may need an admin)"
+	})
+	return m.lingerMsg
+}
+
+// lingerUser names the user for loginctl; falls back to the numeric uid, which
+// loginctl accepts equally.
+func lingerUser() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return strconv.Itoa(os.Getuid())
+}
+
+// joinNotes combines two user-facing caveats into one Warn string.
+func joinNotes(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + "; " + b
+	}
 }
 
 // startNohup is the fallback launcher: a new session (Setsid) so the job detaches

@@ -65,6 +65,62 @@ func TestDetachedJobLifecycle(t *testing.T) {
 	}
 }
 
+// fakeLoginctl writes a stand-in loginctl whose Linger state lives in a temp
+// file, so ensureLinger can be driven through every branch without touching
+// real logind. deny makes enable-linger fail (a site polkit override).
+func fakeLoginctl(t *testing.T, initial string, deny bool) *jobManager {
+	t.Helper()
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
+	if err := os.WriteFile(state, []byte(initial+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	enable := "echo yes > " + state
+	if deny {
+		enable = "exit 1"
+	}
+	script := "#!/bin/sh\ncase \"$1\" in\n" +
+		"show-user) cat " + state + " ;;\n" +
+		"enable-linger) " + enable + " ;;\n" +
+		"esac\n"
+	bin := filepath.Join(dir, "loginctl")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := newJobManager(t.TempDir(), t.TempDir())
+	m.lingerBin = bin
+	return m
+}
+
+// TestEnsureLinger covers the durability check that makes detached jobs survive
+// the user's last session ending: already-on stays quiet, off gets enabled (with
+// a note), and a refused enable produces an actionable warning.
+func TestEnsureLinger(t *testing.T) {
+	if msg := fakeLoginctl(t, "yes", false).ensureLinger(); msg != "" {
+		t.Fatalf("linger already on: want no message, got %q", msg)
+	}
+
+	m := fakeLoginctl(t, "no", false)
+	if msg := m.ensureLinger(); !strings.Contains(msg, "enabled") {
+		t.Fatalf("linger off + enable ok: want 'enabled' note, got %q", msg)
+	}
+	// Cached: the second call must not re-run loginctl (same message back).
+	if msg := m.ensureLinger(); !strings.Contains(msg, "enabled") {
+		t.Fatalf("cached result lost: got %q", msg)
+	}
+
+	if msg := fakeLoginctl(t, "no", true).ensureLinger(); !strings.Contains(msg, "could not enable") {
+		t.Fatalf("linger off + enable denied: want warning, got %q", msg)
+	}
+
+	// No loginctl at all (non-systemd host): stay quiet, don't error.
+	m = newJobManager(t.TempDir(), t.TempDir())
+	m.lingerBin = filepath.Join(t.TempDir(), "missing-loginctl")
+	if msg := m.ensureLinger(); msg != "" {
+		t.Fatalf("no loginctl: want no message, got %q", msg)
+	}
+}
+
 // TestDetachedJobKill starts a long job and stops it, then confirms it no longer
 // reports running.
 func TestDetachedJobKill(t *testing.T) {

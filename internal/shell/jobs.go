@@ -86,13 +86,23 @@ func FormatJobs(jobs []proto.JobInfo) string {
 	}
 	out := fmt.Sprintf("%-8s  %-12s  %-6s  %-8s  %s\n", "ID", "STATE", "MODE", "AGE", "COMMAND")
 	now := time.Now().Unix()
+	anyDead := false
 	for _, j := range jobs {
 		state := j.State
 		if j.State == "done" {
 			state = fmt.Sprintf("done(%d)", j.Code)
 		}
+		anyDead = anyDead || j.State == "dead"
 		out += fmt.Sprintf("%-8s  %-12s  %-6s  %-8s  %s\n",
 			j.ID, state, j.Mode, humanAge(now-j.Started), j.Cmd)
+	}
+	if anyDead {
+		// Diagnose the common cause up front: a job that vanished without an
+		// exit code was almost always reaped by the server tearing down the
+		// user's systemd instance when the last ssh session ended (Linger=no).
+		out += "\ndead = exited without recording an exit code, usually because Source tore down\n" +
+			"your user session (lingering off). lg enables `loginctl` lingering when starting\n" +
+			"new jobs; check `loginctl show-user $USER -p Linger` on Source if this recurs.\n"
 	}
 	return out
 }

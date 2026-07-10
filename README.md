@@ -178,8 +178,11 @@ lg jobs rm <id>                                # forget a finished job + its log
 
 Detached jobs keep running on the server after `lg` exits and after you
 disconnect. Where the server supports it they run under `systemd --user` so a
-closed SSH session can't reap them; `lg` tells you if durability is reduced on a
-given host.
+closed SSH session can't reap them, and `lg` turns on `loginctl` lingering for
+your user if it's off — without lingering, the server stops **all** your
+background units the moment your last SSH session ends, detached or not. If
+durability is reduced on a given host (no systemd, lingering refused), `lg`
+tells you when the job starts.
 
 ---
 
