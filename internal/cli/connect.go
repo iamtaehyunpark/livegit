@@ -15,8 +15,8 @@ import (
 // newConnectCmd establishes lg's own ssh ControlMaster to Source. On a Duo/2FA
 // host this is where the (single) prompt happens — the connection is then cached
 // for `source.control_persist` (default 8h; "max" = until the link drops) and
-// every later `lg` command reuses it without re-prompting. Idempotent: a no-op
-// when a master is already live.
+// every later `lg` command reuses it without re-prompting. Idempotent: with a
+// master already live it just re-verifies the agent (no re-auth, no prompt).
 func newConnectCmd() *cobra.Command {
 	var check, stop bool
 	c := &cobra.Command{
@@ -99,6 +99,11 @@ func establishConnection(cfg *config.Config, force bool) error {
 	if transport.MasterLive(cfg) {
 		if !force {
 			fmt.Printf("Already connected to %s (reusing the cached ssh connection).\n", cfg.Source.Host)
+			// The window can outlive a Ghost upgrade (it lasts hours), so an
+			// "already connected" connect must still verify the agent — over
+			// the live master, which never prompts (BatchMode). Otherwise a
+			// stale agent sticks around until the window expires.
+			checkAgent(cfg)
 			return nil
 		}
 		if err := transport.StopMaster(cfg); err != nil {

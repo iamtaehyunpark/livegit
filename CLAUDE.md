@@ -97,7 +97,9 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   picks 10h for 2FA hosts; `max` = no expiry, lives until the link drops).
   On a password host the stored password is **auto-filled** via SSH_ASKPASS
   (hidden `lg askpass` helper + shim at `.lg/run/askpass.sh`); only the Duo
-  approval is left. Also verifies/upgrades the remote agent after connecting,
+  approval is left. Also verifies/upgrades the remote agent after connecting —
+  including on the "already connected" reuse path (over the live master,
+  BatchMode, so no prompt; a cached window can outlive a Ghost upgrade) —
   and refreshes the project-root GUIDE.md/AGENTS.md when the version changed
   (marker-gated — see `internal/cli/docs.go`; unmarked files are never touched).
   `lg <cmd>` and `lg shell` auto-run this on a terminal; run it by hand to
