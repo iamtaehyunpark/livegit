@@ -16,7 +16,8 @@ gives you two things that feel local but run remote:
 No syncing a whole repo up front, no `rsync` loops, no living in `ssh`.
 
 > **The real point: hand your remote server to a coding agent.** `lg init` drops
-> an `AGENTS.md` into your project, so an agent like Claude Code drives `lg` from
+> an `AGENTS.md` (and its `CLAUDE.md` twin) into your project, so an agent like
+> Claude Code drives `lg` from
 > the very first prompt — editing code locally in the mounted repo, running
 > experiments on the GPU box and reading their live output, kicking off long jobs
 > that survive a disconnect, then debugging and plotting the results. It works
@@ -193,11 +194,13 @@ tells you when the job starts.
 remotely, watch it, iterate.
 
 When you run `lg init`, it drops an **`AGENTS.md`** into your project root (next
-to `GUIDE.md`) — a concise operating guide that teaches an agent how to drive
+to `GUIDE.md`), plus a **`CLAUDE.md`** with the same content — Claude Code reads
+that filename natively, where other agents pick up `AGENTS.md`. It's a concise
+operating guide that teaches an agent how to drive
 `lg`: how to run things on the server, how output streams, how the local↔remote
 paths map, and how to edit files the right way. Point your agent at it once and
 it behaves as if it natively understood the split between your laptop and the
-server — no hand-holding per command. Both guides carry a marker line and are
+server — no hand-holding per command. All three carry a marker line and are
 refreshed automatically by `lg connect` when you upgrade lg (remove the marker
 to keep your own copy).
 

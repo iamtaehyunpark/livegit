@@ -22,7 +22,9 @@ AGENTDIR := internal/agentbin/data
 DOCSDIR  := internal/docs
 
 ## docs: sync the embedded guides with the repo-root originals (so `lg init`
-## drops the current GUIDE.md / AGENTS.md into each project root).
+## drops the current GUIDE.md / AGENTS.md into each project root; AGENTS.md is
+## also dropped as CLAUDE.md — mapped in internal/docs/embed.go, not a file here.
+## Do NOT copy the repo-root CLAUDE.md: that's this repo's own dev notes).
 docs:
 	@cp GUIDE.md AGENTS.md $(DOCSDIR)/
 	@echo "synced embedded docs in $(DOCSDIR)"

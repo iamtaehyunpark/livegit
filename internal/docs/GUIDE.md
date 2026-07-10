@@ -238,7 +238,7 @@ Settings live in `<project>/.lg/config.yaml`. Change scalars with
 | `source.auth` | `` (key/agent or interactive-via-`lg connect`) or `password` (encrypted store; native ssh answers it directly, or — with `ssh_mode: system` on a Duo host — `lg connect` auto-fills it via SSH_ASKPASS). |
 | `source.control_persist` | How long the cached ssh connection lives after last use: a duration (default `8h`; `lg init` picks `10h` for second-auth hosts) or `max` (no expiry — lives until the link drops). Longer = fewer 2FA prompts. `system` mode only. |
 | `source.agent_bin` | Path to `lg` on the server; default `lg` (resolved from `~/.local/bin`). |
-| `local_root` | The mount folder (set for you at init, named after the repo). |
+| `local_root` | The mount folder. Leave unset (the default): lg derives it at runtime — a sibling of `.lg/` named after the repo — so the mount follows the project if you ever move it. Set an absolute path only to pin it somewhere else. |
 | `ignore` | Patterns never synced/listed (`.venv/`, `node_modules/`, `.DS_Store`, `*.pt`, …). Keeps the tree fast and clean. |
 | `auto_remote_commands` | Commands that auto-run on the server inside `lg shell` (default `ls cat tree head tail less grep find stat wc file`). Set to `[]` to disable. |
 | `default_target` | `local` (default) or `source` (start `lg shell` with toggle already on). |
@@ -279,6 +279,7 @@ the single source of truth for content — think "iTerm2 + ssh, but invisible" p
 
 ---
 
-*Working with an AI coding agent? Point it at [`AGENTS.md`](AGENTS.md) — it
+*Working with an AI coding agent? Point it at [`AGENTS.md`](AGENTS.md) — also
+dropped as `CLAUDE.md`, the filename Claude Code loads natively — it
 teaches an agent to drive `lg` at full power: running commands, mounting the
 tree for native file edits, and leaving long jobs running detached.*

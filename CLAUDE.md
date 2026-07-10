@@ -100,7 +100,9 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   approval is left. Also verifies/upgrades the remote agent after connecting —
   including on the "already connected" reuse path (over the live master,
   BatchMode, so no prompt; a cached window can outlive a Ghost upgrade) —
-  and refreshes the project-root GUIDE.md/AGENTS.md when the version changed
+  and refreshes the project-root GUIDE.md/AGENTS.md/CLAUDE.md when the version
+  changed (CLAUDE.md = the AGENTS.md content under the filename Claude Code
+  loads natively; `internal/docs/embed.go` maps it, no separate file)
   (marker-gated — see `internal/cli/docs.go`; unmarked files are never touched).
   `lg <cmd>` and `lg shell` auto-run this on a terminal; run it by hand to
   pre-authenticate before a scripted/agent-driven run that can't answer a Duo
@@ -259,7 +261,13 @@ by walking up from the cwd** (project-only — no global config; outside a proje
 it errors "not an lg project"). The remote tree mounts at a sibling dir **named
 exactly after the Source repo** (basename of remote_root, e.g. `<project>/two-
 stage-stitcher/`) next to `.lg/` — no mount-name option (FUSE can't mount over
-the project root without hiding `.lg/`). `lg <cmd>` runs in the remote dir
+the project root without hiding `.lg/`). Since v1.3.5 that path is **derived at
+runtime** (`config.MountDir()`): `lg init` no longer writes `local_root`, so
+moving a project moves the mount with it. A non-empty `local_root` (older
+configs, or `lg config set local_root <abs path>`) pins the mountpoint and wins;
+set it to `""` to un-pin. (Found live 2026-07-10: a `.lg/` moved after init kept
+mounting at the frozen init-time path, while a look-alike clone sat next to it —
+very confusing.) `lg <cmd>` runs in the remote dir
 matching your cwd: under `<mount>/a/b/c`, `lg ls` runs in `remote_root/a/b/c`
 (relDir from `os.Getwd` via `PathMapper.LocalToRel` → `ExecReq.Cwd`).
 `config.Dir()` is the single resolver (`internal/config/config.go`): it returns
