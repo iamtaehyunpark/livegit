@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/iamtaehyunpark/livegit/internal/config"
 	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
@@ -43,6 +44,56 @@ func TestDelDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "fulldir", "keep.txt")); err != nil {
 		t.Fatal("non-empty dir contents must be preserved")
+	}
+}
+
+// A dir delete arrives after Ghost unlinked everything it had synced, so
+// leftovers that could never sync (empty subdir skeletons, macOS junk,
+// ignore-matched content) must not block it — the user deleted a fully-synced
+// dir and expects it gone, not resurrected by the next tree sync. Real
+// non-ignored files still decline.
+func TestDelDirectoryUnsyncedLeftovers(t *testing.T) {
+	root := t.TempDir()
+	fs := NewFileServer(root, config.NewMatcher([]string{"*.pt", ".venv/"}))
+
+	// Only unsyncable leftovers: delete completes recursively.
+	gone := filepath.Join(root, "gone")
+	if err := os.MkdirAll(filepath.Join(gone, "__pycache__"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(gone, ".venv", "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{".DS_Store", "model.pt", ".venv/lib/site.py"} {
+		if err := os.WriteFile(filepath.Join(gone, filepath.FromSlash(f)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ack, err := fs.del(proto.DelReq{Rel: "gone"})
+	if err != nil || !ack.OK {
+		t.Fatalf("junk-only dir delete: ack=%+v err=%v", ack, err)
+	}
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Fatal("dir with only unsyncable leftovers should be gone")
+	}
+
+	// One real (synced-class) file among the junk: kept, conflict ack.
+	keep := filepath.Join(root, "keep")
+	if err := os.MkdirAll(filepath.Join(keep, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keep, "sub", "data.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ack, err = fs.del(proto.DelReq{Rel: "keep"})
+	if err != nil {
+		t.Fatalf("unsynced-content dir delete must not error: %v", err)
+	}
+	if ack.OK || !ack.Conflict {
+		t.Fatalf("want conflict ack, got %+v", ack)
+	}
+	if _, err := os.Stat(filepath.Join(keep, "sub", "data.txt")); err != nil {
+		t.Fatal("unsynced file must be preserved")
 	}
 }
 

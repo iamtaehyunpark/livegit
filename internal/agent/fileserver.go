@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
@@ -186,15 +187,28 @@ func (fs *FileServer) del(req proto.DelReq) (proto.DelAck, error) {
 	if info.IsDir() {
 		// Journaled rmdir. Directories have no content hash, so skip the
 		// conflict check (hashing a dir errors with EISDIR — that used to fail
-		// the RPC forever and block the whole flush queue behind it). The dir
-		// should be empty by now (children are earlier journal entries); if
-		// Source still holds files Ghost never saw (e.g. ignored paths), keep
-		// the dir and report a conflict ack — Ghost drops the entry and the
-		// next tree sync resurfaces the dir, instead of wedging the queue.
-		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
-			fs.log.Warn("dir delete skipped", "rel", req.Rel, "err", err)
-			return proto.DelAck{OK: false, Conflict: true,
-				Message: "directory not removed: " + err.Error()}, nil
+		// the RPC forever and block the whole flush queue behind it). Ghost
+		// unlinks every child it has synced before this rmdir arrives, so a
+		// non-empty dir here holds only things Ghost never showed the user:
+		// leftover empty subdirs, macOS junk, or ignore-matched content. If
+		// that's all that remains, the user deleted a fully-synced dir —
+		// finish the job recursively. A real non-ignored file means content
+		// that never synced to Ghost: keep the dir and report a conflict ack —
+		// Ghost drops the entry and the next tree sync resurfaces the dir,
+		// instead of wedging the queue.
+		err := os.Remove(abs)
+		if err != nil && !os.IsNotExist(err) {
+			if blocker := fs.unsyncedLeft(abs); blocker != "" {
+				fs.log.Warn("dir delete skipped: unsynced content on source",
+					"rel", req.Rel, "blocker", blocker)
+				return proto.DelAck{OK: false, Conflict: true,
+					Message: "directory not removed: holds unsynced " + blocker}, nil
+			}
+			if err := os.RemoveAll(abs); err != nil {
+				fs.log.Warn("dir delete skipped", "rel", req.Rel, "err", err)
+				return proto.DelAck{OK: false, Conflict: true,
+					Message: "directory not removed: " + err.Error()}, nil
+			}
 		}
 		return proto.DelAck{OK: true}, nil
 	}
@@ -217,6 +231,46 @@ func (fs *FileServer) del(req proto.DelReq) (proto.DelAck, error) {
 		return proto.DelAck{}, err
 	}
 	return proto.DelAck{OK: true}, nil
+}
+
+// unsyncedLeft walks a directory Ghost asked to delete and returns the rel of
+// the first entry that could NOT have been deleted through the mount: a regular
+// file that is neither macOS junk nor ignore-matched (ignored paths never sync,
+// so their presence doesn't mean the user's view was incomplete). Returns ""
+// when everything left is deletable — i.e. Ghost's view of the dir was complete
+// and the whole delete should go through.
+func (fs *FileServer) unsyncedLeft(absDir string) string {
+	blocker := ""
+	_ = filepath.WalkDir(absDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			blocker = p // unreadable: assume unsynced, keep the dir
+			return filepath.SkipAll
+		}
+		if p == absDir {
+			return nil
+		}
+		rel, rerr := fs.mapper.RemoteToRel(p)
+		if rerr != nil {
+			blocker = p
+			return filepath.SkipAll
+		}
+		if fs.matcher != nil && fs.matcher.Match(rel, d.IsDir()) {
+			if d.IsDir() {
+				return filepath.SkipDir // ignored subtree: deletable wholesale
+			}
+			return nil
+		}
+		base := filepath.Base(p)
+		if base == ".DS_Store" || strings.HasPrefix(base, "._") {
+			return nil // macOS junk never syncs regardless of config
+		}
+		if d.IsDir() {
+			return nil // empty dirs are fine; a file below would flag itself
+		}
+		blocker = rel // real content Ghost never synced (incl. symlinks/fifos)
+		return filepath.SkipAll
+	})
+	return blocker
 }
 
 func (fs *FileServer) list(rel string) (proto.ListResp, error) {

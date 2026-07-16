@@ -39,6 +39,12 @@ func (s *fakeSource) put(rel, content string) {
 	s.files[rel] = fakeFile{content: []byte(content), mode: 0o644, mod: time.Now().Unix()}
 }
 
+func (s *fakeSource) putDir(rel string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.files[rel] = fakeFile{mode: 0o755, mod: time.Now().Unix(), isDir: true}
+}
+
 func (s *fakeSource) get(rel string) (fakeFile, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -516,6 +522,65 @@ func TestRenameDirMovesSubtree(t *testing.T) {
 	}
 	if _, ok := src.get("old/a.txt"); ok {
 		t.Fatal("old subtree should be deleted on source")
+	}
+}
+
+// A dir rename must journal deletes for every source subdirectory (children
+// before parents), not just the top dir — otherwise the skeleton stays on
+// Source, the top-dir rmdir declines ("not empty"), and the old dir resurrects
+// on the next tree sync. Empty subdirs must also be mirrored at the destination.
+func TestRenameDirDeletesSubdirsBottomUp(t *testing.T) {
+	b, src := harness(t)
+	src.put("old/sub/b.txt", "bbb")
+	src.putDir("old/emptydir")
+	if err := b.SyncTree(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RecordRename(context.Background(), "old", "new"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Journal must delete old/sub and old/emptydir before old, and mkdir the
+	// mirrored empty dir at the destination.
+	pos := map[string]int{}
+	mkdirs := map[string]bool{}
+	for i, e := range b.journal.PendingSnapshot() {
+		if e.Op == OpDelete {
+			pos[e.Rel] = i
+		}
+		if e.Op == OpMkdir {
+			mkdirs[e.Rel] = true
+		}
+	}
+	for _, d := range []string{"old/sub", "old/emptydir"} {
+		di, ok := pos[d]
+		if !ok {
+			t.Fatalf("no journaled delete for subdir %s", d)
+		}
+		if di > pos["old"] {
+			t.Fatalf("subdir %s deleted after its parent old", d)
+		}
+	}
+	if !mkdirs["new/emptydir"] {
+		t.Fatal("empty subdir should be mirrored at the destination")
+	}
+
+	for {
+		e, ok := b.journal.Peek()
+		if !ok {
+			break
+		}
+		if err := b.flushEntry(context.Background(), e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rel := range []string{"old", "old/sub", "old/emptydir", "old/sub/b.txt"} {
+		if _, ok := src.get(rel); ok {
+			t.Fatalf("source should have no %s after the move", rel)
+		}
+	}
+	if f, ok := src.get("new/emptydir"); !ok || !f.isDir {
+		t.Fatal("source should hold the mirrored empty dir new/emptydir")
 	}
 }
 

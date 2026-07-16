@@ -414,17 +414,24 @@ func (b *Backend) recordRenameFile(ctx context.Context, oldRel, newRel string) e
 }
 
 // recordRenameDir moves a directory by re-journaling each descendant file as an
-// individual move (last-write-wins per file), then deletes the old subtree. The
-// destination directories materialize on Source as a side effect of the file
-// writes (the file server MkdirAll's parents).
+// individual move (last-write-wins per file), mirroring each subdirectory at
+// the destination (so empty dirs survive the move), then deleting the old
+// subtree — subdirs deepest-first, top dir last, so every rmdir reaching Source
+// finds the dir already empty. Deleting only the top dir used to leave the old
+// subdir skeleton behind on Source: its rmdir failed "not empty", the journal
+// entry was dropped, and the next tree sync resurrected the old dir.
 func (b *Backend) recordRenameDir(ctx context.Context, oldRel, newRel string) error {
-	// Snapshot the descendant file list first, since each move mutates the index.
-	var files []string
+	// Snapshot the descendant lists first, since each move mutates the index.
+	// dirs is in pre-order (parent before child).
+	var files, dirs []string
+	dirMode := map[string]uint32{}
 	var walk func(rel string)
 	walk = func(rel string) {
 		for _, c := range b.index.Children(rel) {
 			childRel := config.Rel(rel + "/" + c.Name)
 			if c.IsDir {
+				dirs = append(dirs, childRel)
+				dirMode[childRel] = c.Mode
 				walk(childRel)
 			} else {
 				files = append(files, childRel)
@@ -434,14 +441,22 @@ func (b *Backend) recordRenameDir(ctx context.Context, oldRel, newRel string) er
 	walk(oldRel)
 
 	b.markDir(newRel, 0o755)
+	for _, d := range dirs {
+		rest := strings.TrimPrefix(d, oldRel+"/")
+		b.markDir(config.Rel(newRel+"/"+rest), dirMode[d])
+	}
 	for _, f := range files {
 		rest := strings.TrimPrefix(f, oldRel+"/")
 		if err := b.recordRenameFile(ctx, f, config.Rel(newRel+"/"+rest)); err != nil {
 			return err
 		}
 	}
-	// Drop the now-empty source subtree locally and journal a delete so Source
-	// removes the old (now-empty) directory too.
+	// Drop the now-empty source subtree: children before parents.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := b.RecordDelete(dirs[i]); err != nil {
+			return err
+		}
+	}
 	return b.RecordDelete(oldRel)
 }
 
