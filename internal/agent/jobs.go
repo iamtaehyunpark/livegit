@@ -282,7 +282,7 @@ func (m *jobManager) list() []proto.JobInfo {
 		}
 		out = append(out, info)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Started > out[j].Started })
+	sort.Slice(out, func(i, j int) bool { return out[i].Started < out[j].Started })
 	return out
 }
 

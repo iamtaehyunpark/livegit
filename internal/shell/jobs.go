@@ -79,10 +79,18 @@ func StreamLog(client *transport.Client, id string, follow bool) error {
 	return err
 }
 
-// FormatJobs renders `lg jobs` output. Kept here so the CLI stays a thin caller.
-func FormatJobs(jobs []proto.JobInfo) string {
+// FormatJobs renders `lg jobs` output, oldest first (the most recently
+// started job at the bottom). Kept here so the CLI stays a thin caller.
+// limit caps how many jobs are shown, keeping the most recent ones; 0 (or a
+// limit >= len(jobs)) shows the full list.
+func FormatJobs(jobs []proto.JobInfo, limit int) string {
 	if len(jobs) == 0 {
 		return "no jobs\n"
+	}
+	hidden := 0
+	if limit > 0 && limit < len(jobs) {
+		hidden = len(jobs) - limit
+		jobs = jobs[hidden:]
 	}
 	out := fmt.Sprintf("%-8s  %-12s  %-6s  %-8s  %s\n", "ID", "STATE", "MODE", "AGE", "COMMAND")
 	now := time.Now().Unix()
@@ -95,6 +103,9 @@ func FormatJobs(jobs []proto.JobInfo) string {
 		anyDead = anyDead || j.State == "dead"
 		out += fmt.Sprintf("%-8s  %-12s  %-6s  %-8s  %s\n",
 			j.ID, state, j.Mode, humanAge(now-j.Started), j.Cmd)
+	}
+	if hidden > 0 {
+		out += fmt.Sprintf("\n%d earlier job(s) hidden; use --all or -n to see them\n", hidden)
 	}
 	if anyDead {
 		// Diagnose the common cause up front: a job that vanished without an

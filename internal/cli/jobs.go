@@ -13,6 +13,8 @@ import (
 // they outlive the launching command (and the ghost disconnecting). `kill` and
 // `rm` manage their lifecycle.
 func newJobsCmd() *cobra.Command {
+	var limit int
+	var all bool
 	cmd := &cobra.Command{
 		Use:   "jobs",
 		Short: "List detached remote jobs (started with `lg run --detach`)",
@@ -27,10 +29,16 @@ func newJobsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Print(shell.FormatJobs(jobs))
+			n := limit
+			if all {
+				n = 0
+			}
+			fmt.Print(shell.FormatJobs(jobs, n))
 			return nil
 		},
 	}
+	cmd.Flags().IntVarP(&limit, "limit", "n", 20, "max jobs to show (most recent kept)")
+	cmd.Flags().BoolVar(&all, "all", false, "show the full job list, ignoring --limit")
 	cmd.AddCommand(
 		newJobsActCmd("kill <id>", "Stop a running job", "kill"),
 		newJobsActCmd("rm <id>", "Remove a finished job and delete its logs", "rm"),
