@@ -41,6 +41,10 @@ type Backend struct {
 
 	testCapBytes int64 // test-only content-cache cap override (0 = use config GB)
 
+	// xattrs holds Finder/macOS extended attributes in memory, per mount
+	// session — never synced to Source. See xattr.go for why this exists.
+	xattrs xattrStore
+
 	// synced flips true after the first successful full-tree sync. From then on
 	// the index is authoritative for negatives: Getattr answers ENOENT locally
 	// instead of paying a per-lookup remote Stat (macOS probes nonexistent names
@@ -359,6 +363,9 @@ func (b *Backend) RecordRename(ctx context.Context, oldRel, newRel string) error
 	if oldRel == "" || oldRel == newRel {
 		return nil // renaming a thing onto itself: nothing to do
 	}
+	// Move session-local xattrs along. Done up front: if the rename fails
+	// mid-way, losing Finder bookkeeping attrs is harmless.
+	b.xattrRename(oldRel, newRel)
 	if e, ok := b.index.Get(oldRel); ok && e.IsDir {
 		return b.recordRenameDir(ctx, oldRel, newRel)
 	}
@@ -554,6 +561,7 @@ func (b *Backend) RecordDelete(rel string) error {
 	}
 	_ = os.Remove(b.cachePath(rel))
 	b.index.Remove(rel)
+	b.xattrForget(rel)
 	return nil
 }
 
