@@ -77,6 +77,7 @@ func (j *Journal) load() error {
 		if err := json.Unmarshal(line, &e); err != nil {
 			continue // tolerate a torn final line
 		}
+		j.coalesceLocked(e)
 		j.pending = append(j.pending, e)
 		if e.Seq > j.nextSeq {
 			j.nextSeq = e.Seq
@@ -101,9 +102,32 @@ func (j *Journal) Append(e JournalEntry) (uint64, error) {
 	if err := j.f.Sync(); err != nil {
 		return 0, err
 	}
+	j.coalesceLocked(e)
 	j.pending = append(j.pending, e)
 	j.signal()
 	return e.Seq, nil
+}
+
+// coalesceLocked drops pending write/create entries superseded by a new
+// write/create for the same path. Content is read from the cache at flush time
+// and pushes are last-write-wins, so only the newest such entry matters — a
+// Finder copy closes + chmods each file several times, and without this every
+// one of those events re-uploads the whole file (a big folder moved ~10x its
+// size). Deletes and mkdirs keep their place; only stale writes are dropped.
+// The superseded on-disk lines are left behind (append-only) — the next Ack
+// compaction clears them, and load() applies the same coalescing on replay.
+func (j *Journal) coalesceLocked(e JournalEntry) {
+	if e.Op != OpWrite && e.Op != OpCreate {
+		return
+	}
+	out := j.pending[:0]
+	for _, p := range j.pending {
+		if p.Rel == e.Rel && (p.Op == OpWrite || p.Op == OpCreate) {
+			continue
+		}
+		out = append(out, p)
+	}
+	j.pending = out
 }
 
 func (j *Journal) signal() {

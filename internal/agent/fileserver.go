@@ -160,6 +160,25 @@ func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
 		mode = 0o644
 	}
 	if err := os.WriteFile(abs, req.Content, mode); err != nil {
+		// Last-write-wins must also beat a read-only target: an existing file
+		// without the owner write bit (git pack files are 0444) makes the
+		// O_WRONLY open fail EACCES — and since the flush queue drains strictly
+		// in order, that one entry would wedge the whole journal. Make it
+		// writable, retry, and let the chmod below set the final mode.
+		if !os.IsPermission(err) {
+			return proto.WriteAck{}, err
+		}
+		if chErr := os.Chmod(abs, mode|0o200); chErr != nil {
+			return proto.WriteAck{}, err
+		}
+		if err := os.WriteFile(abs, req.Content, mode); err != nil {
+			return proto.WriteAck{}, err
+		}
+	}
+	// os.WriteFile applies mode only when it creates the file; chmod explicitly
+	// so a mode change journaled for an existing file (chmod +x, Finder's
+	// permission pass) actually lands on Source.
+	if err := os.Chmod(abs, mode); err != nil {
 		return proto.WriteAck{}, err
 	}
 	if req.ModTime > 0 {

@@ -28,9 +28,39 @@ make test           # full suite (unit + in-memory Ghost<->Source integration)
 make vet
 make install        # builds + atomically installs to ~/.local/bin/lg
 make release        # cross-compiles ./dist/lg-{darwin,linux}-{arm64,amd64}
+make publish TAG=vX.Y.Z   # full release (see "Deployment / release routine")
 ```
 
 `~/.local/bin` is on the user's PATH, so `lg` runs directly after `make install`.
+
+### Deployment / release routine
+
+Releasing serves both install paths (curl installer + Homebrew) in ONE step:
+
+```sh
+make publish TAG=vX.Y.Z    # runs scripts/publish-release.sh
+```
+
+The script preflights (clean tree, `gh` authed, tag unused), tags + pushes the
+tag, runs `make release`, creates the GitHub release with the four binaries,
+regenerates `Formula/lg.rb` from the new sha256s, commits it here
+("Formula: release vX.Y.Z"), and pushes the formula to the tap repo
+(`iamtaehyunpark/homebrew-livegit`). So the order is: commit the code changes
+and push `main` FIRST (the script refuses a dirty tree), then publish, then
+`make install` so the local Ghost runs the tagged build.
+
+Redeploying the agent to Sources after a release (or any protocol change):
+
+```sh
+scp dist/lg-linux-amd64 <host>:.local/bin/lg.new && \
+  ssh <host> 'mv ~/.local/bin/lg.new ~/.local/bin/lg && chmod +x ~/.local/bin/lg'
+```
+
+scp to a temp name + `mv` — copying over a running Linux binary in place fails
+with ETXTBSY. galaxy-04/05 share an NFS home, so one deploy covers both.
+Alternatively just run `lg connect` per project: `EnsureAgent` sees the version
+mismatch and re-uploads the matching embedded agent automatically. Keep both
+sides on the same build (protocol must match).
 
 ### macOS code-signing trap (IMPORTANT)
 
@@ -242,7 +272,7 @@ command. `agent_bin` stays `"lg"` (resolved by the PATH-prefix in
 
 The user's real Source is **galaxy-04** (UW–Madison CS). Both sides currently run
 the same build — **keep them in sync** (protocol must match): after changing lg,
-`make release && scp dist/lg-linux-amd64 galaxy-04:.local/bin/lg`.
+redeploy per "Deployment / release routine" above.
 
 ```
 Ghost (this Mac):  ~/.local/bin/lg   (the binary)
@@ -371,8 +401,8 @@ lg unmount; ssh galaxy-04 'pkill -f "lg serve"'`.
 - This is a personal tool for one user; keep changes simple and well-commented.
 - Don't trigger a Duo push without the user expecting it (see above).
 - `local_root` must be an **empty** dir (FUSE mounts Source's tree over it).
-- Commit style: end messages with the Co-Authored-By trailer. Work on a branch
-  (current: `feat/livegit-v0.2`), push when the user asks.
+- Commit style: end messages with the Co-Authored-By trailer. Day-to-day work
+  and releases happen on `main`; push when the user asks.
 - After any protocol/transport change, redeploy the Linux binary to galaxy so the
   two sides stay on the same build.
 

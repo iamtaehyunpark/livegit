@@ -151,3 +151,38 @@ func TestDelFileConflictStillDetected(t *testing.T) {
 		t.Fatalf("plain delete: ack=%+v err=%v", ack, err)
 	}
 }
+
+// write() must overwrite a read-only existing file (git pack files are 0444):
+// os.WriteFile applies mode only at creation, so without the chmod-retry the
+// open fails EACCES and that one entry wedges the whole flush queue behind it
+// (the EngramTrace/.git pack bug). A mode-only change to an existing file must
+// also actually land on Source.
+func TestWriteReadOnlyTargetAndModeChange(t *testing.T) {
+	root := t.TempDir()
+	fs := NewFileServer(root, nil)
+	abs := filepath.Join(root, "pack.idx")
+
+	if err := os.WriteFile(abs, []byte("old"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := fs.write(proto.WriteReq{Rel: "pack.idx", Content: []byte("new"), Mode: 0o444})
+	if err != nil || !ack.OK {
+		t.Fatalf("write over read-only file: ack=%+v err=%v", ack, err)
+	}
+	b, err := os.ReadFile(abs)
+	if err != nil || string(b) != "new" {
+		t.Fatalf("content = %q err=%v, want %q", b, err, "new")
+	}
+	if info, _ := os.Stat(abs); info.Mode().Perm() != 0o444 {
+		t.Fatalf("mode = %o, want 0444", info.Mode().Perm())
+	}
+
+	// chmod journaled as a write against an existing file: mode must change.
+	ack, err = fs.write(proto.WriteReq{Rel: "pack.idx", Content: []byte("new"), Mode: 0o644})
+	if err != nil || !ack.OK {
+		t.Fatalf("mode-change write: ack=%+v err=%v", ack, err)
+	}
+	if info, _ := os.Stat(abs); info.Mode().Perm() != 0o644 {
+		t.Fatalf("mode = %o, want 0644", info.Mode().Perm())
+	}
+}
