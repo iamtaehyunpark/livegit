@@ -84,11 +84,24 @@ type FileStat struct {
 type StatReq struct{ Rel string }
 type StatResp struct{ Stat FileStat }
 
-type ReadReq struct{ Rel string }
+// ChunkSize is how much file content moves per frame (SFTP-style offset
+// loop). Bounded chunks keep every frame far under the codec's 256 MiB cap —
+// a single whole-file frame for a 200 MB+ file used to exceed it after JSON
+// base64 inflation and kill the connection — and cap agent memory per read.
+const ChunkSize = 4 << 20
+
+type ReadReq struct {
+	Rel    string
+	Offset int64 // chunk start; Ghost loops offset += len(Content) until !More
+	MaxLen int64 // max bytes in this chunk (0 = agent default; agent caps it)
+}
 type ReadResp struct {
 	Found   bool
-	Content []byte
-	Hash    string
+	Content []byte // this chunk's bytes
+	More    bool   // true when more bytes follow after this chunk
+	Size    int64  // total file size (Ghost detects mid-fetch changes with it)
+	Hash    string // whole-file hash, filled by the GHOST after reassembly —
+	// the agent never hashes on read (that would re-read the entire file)
 	ModTime int64
 	Mode    uint32
 }
@@ -99,7 +112,9 @@ type ReadResp struct {
 // sides diverged and Source backs up before applying.
 type WriteReq struct {
 	Rel      string
-	Content  []byte
+	Content  []byte // this chunk's bytes (the whole file when Offset=0, More=false)
+	Offset   int64  // where this chunk lands; big files upload in ChunkSize pieces
+	More     bool   // true = more chunks follow; the final (!More) chunk commits
 	BaseHash string
 	ModTime  int64
 	Mode     uint32
@@ -149,8 +164,21 @@ type TreeEntry struct {
 	Mode    uint32
 	Hash    string
 }
-type TreeReq struct{}
-type TreeResp struct{ Entries []TreeEntry }
+// TreeReq/TreeResp page the snapshot (Dropbox-delta-style cursor + digest)
+// instead of shipping one giant frame: a 1M+ entry tree would exceed the frame
+// cap as a single TreeResp. Cursor 0 makes the agent walk fresh; when the walk's
+// digest equals the digest Ghost already holds, the reply is just "Unchanged"
+// and no entries move at all (the steady-state refresh becomes ~free).
+type TreeReq struct {
+	Digest string // tree digest Ghost holds ("" = none, always fetch)
+	Cursor int    // 0 = walk fresh; >0 = fetch page Cursor of snapshot Digest
+}
+type TreeResp struct {
+	Unchanged bool   // walk matched req.Digest; no page data included
+	Digest    string // identity of this walk (echoed back in page requests)
+	Pages     int    // total page count (set on the Cursor==0 reply)
+	Gz        []byte // one page: gzipped JSON []TreeEntry (paths compress ~10x)
+}
 
 // --- Change notification ---
 

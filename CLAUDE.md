@@ -411,8 +411,13 @@ lg unmount; ssh galaxy-04 'pkill -f "lg serve"'`.
 - A `make deploy-source` one-step redeploy of the Linux binary to Source.
 - A `lg doctor` that checks config + ssh reachability + remote agent + remote_root
   + macFUSE + stale mounts in one non-interactive command (great for agent tests).
-- Full-tree sync ships one whole `TreeResp` snapshot (fine for typical repos under
-  the 256 MiB frame cap); page it if a repo is huge.
+- ~~Full-tree sync ships one whole `TreeResp` snapshot~~ Fixed: tree sync is now
+  paged + gzipped + digest-gated (unchanged tree = no transfer), the walk is
+  parallel, and file content moves in 4 MiB chunks both ways (a whole-file frame
+  for a 200 MB+ file used to exceed the 256 MiB cap after base64 and kill the
+  connection — found live on sclab 2026-07-22). Big-file reads still fetch the
+  WHOLE file on open (materialize is all-or-nothing); range-lazy reads are the
+  remaining gap if that ever hurts.
 - `.git` is still synced into the mount (only `ignore` patterns are skipped). Add
   `.git/` to config `ignore` if you want it out — git ops should run via `lg <cmd>`.
 - `lg toggle` uses the zsh/bash preexec hook; the bash DEBUG-trap path is

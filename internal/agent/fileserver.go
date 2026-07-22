@@ -1,12 +1,19 @@
 package agent
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
@@ -22,6 +29,12 @@ type FileServer struct {
 	mapper  *config.PathMapper
 	matcher *config.Matcher
 	log     *slog.Logger
+
+	// Last full-tree walk, kept so Ghost can page through it (treePage).
+	treeMu       sync.Mutex
+	treeDigest   string
+	treePages    [][]byte
+	treePageSize int // entries per page; 0 = defaultTreePageSize (tests shrink it)
 }
 
 // NewFileServer builds a file server. remoteRoot overrides config when the
@@ -48,7 +61,7 @@ func (fs *FileServer) Handle(f proto.Frame) (proto.MsgType, any, bool, error) {
 	case proto.TypeReadReq:
 		var req proto.ReadReq
 		_ = proto.Unmarshal(f.Body, &req)
-		resp, err := fs.read(req.Rel)
+		resp, err := fs.read(req)
 		return proto.TypeReadResp, resp, true, err
 	case proto.TypeWriteReq:
 		var req proto.WriteReq
@@ -66,7 +79,9 @@ func (fs *FileServer) Handle(f proto.Frame) (proto.MsgType, any, bool, error) {
 		resp, err := fs.list(req.Rel)
 		return proto.TypeListResp, resp, true, err
 	case proto.TypeTreeReq:
-		resp, err := fs.tree()
+		var req proto.TreeReq
+		_ = proto.Unmarshal(f.Body, &req)
+		resp, err := fs.treePage(req)
 		return proto.TypeTreeResp, resp, true, err
 	default:
 		return 0, nil, false, fmt.Errorf("fileserver: unexpected type %d", f.Type)
@@ -94,23 +109,41 @@ func (fs *FileServer) stat(rel string) proto.FileStat {
 	return st
 }
 
-func (fs *FileServer) read(rel string) (proto.ReadResp, error) {
-	abs := fs.abs(rel)
+// readChunkMax caps how much a single ReadReq may ask for, whatever the peer
+// sends — one chunk must always stay far under the codec's frame cap.
+const readChunkMax = 8 << 20
+
+// read serves one chunk of a file. Ghost loops Offset until !More; only the
+// requested window is read into memory, so a multi-GB file never builds a
+// whole-file buffer (or frame) on the agent.
+func (fs *FileServer) read(req proto.ReadReq) (proto.ReadResp, error) {
+	abs := fs.abs(req.Rel)
 	info, err := os.Stat(abs)
 	if err != nil {
 		return proto.ReadResp{Found: false}, nil
 	}
 	if info.IsDir() {
-		return proto.ReadResp{Found: false}, fmt.Errorf("%s is a directory", rel)
+		return proto.ReadResp{Found: false}, fmt.Errorf("%s is a directory", req.Rel)
 	}
-	b, err := os.ReadFile(abs)
+	max := req.MaxLen
+	if max <= 0 || max > readChunkMax {
+		max = proto.ChunkSize
+	}
+	f, err := os.Open(abs)
 	if err != nil {
+		return proto.ReadResp{}, err
+	}
+	defer f.Close()
+	buf := make([]byte, max)
+	n, err := f.ReadAt(buf, req.Offset)
+	if err != nil && err != io.EOF {
 		return proto.ReadResp{}, err
 	}
 	return proto.ReadResp{
 		Found:   true,
-		Content: b,
-		Hash:    hashx.Bytes(b),
+		Content: buf[:n],
+		More:    req.Offset+int64(n) < info.Size(),
+		Size:    info.Size(),
 		ModTime: info.ModTime().Unix(),
 		Mode:    uint32(info.Mode().Perm()),
 	}, nil
@@ -137,6 +170,42 @@ func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return proto.WriteAck{}, err
 	}
+
+	// Chunked upload (big files arrive in ChunkSize pieces): accumulate into a
+	// sidecar staging file; only the final chunk falls through to commit below,
+	// so a half-uploaded file is never visible at the real path.
+	staged := req.Offset > 0 || req.More
+	part := abs + ".lg-part"
+	if staged {
+		flags := os.O_WRONLY | os.O_CREATE | os.O_APPEND
+		if req.Offset == 0 {
+			flags |= os.O_TRUNC // fresh upload; also clears any abandoned staging
+		}
+		f, err := os.OpenFile(part, flags, 0o600)
+		if err != nil {
+			return proto.WriteAck{}, err
+		}
+		st, err := f.Stat()
+		if err == nil && st.Size() != req.Offset {
+			// A gap means a lost/replayed chunk; fail the whole write so the
+			// Ghost's flush retry restarts it from offset 0.
+			f.Close()
+			os.Remove(part)
+			return proto.WriteAck{}, fmt.Errorf("write chunk gap for %s: staged %d bytes, chunk offset %d", req.Rel, st.Size(), req.Offset)
+		}
+		if _, err := f.Write(req.Content); err != nil {
+			f.Close()
+			os.Remove(part)
+			return proto.WriteAck{}, err
+		}
+		if err := f.Close(); err != nil {
+			os.Remove(part)
+			return proto.WriteAck{}, err
+		}
+		if req.More {
+			return proto.WriteAck{OK: true}, nil
+		}
+	}
 	ack := proto.WriteAck{}
 
 	current, err := hashx.File(abs)
@@ -159,7 +228,14 @@ func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
 	if mode == 0 {
 		mode = 0o644
 	}
-	if err := os.WriteFile(abs, req.Content, mode); err != nil {
+	if staged {
+		// Atomic commit of the accumulated chunks (rename replaces even a
+		// read-only target — permission lives on the directory).
+		if err := os.Rename(part, abs); err != nil {
+			os.Remove(part)
+			return proto.WriteAck{}, err
+		}
+	} else if err := os.WriteFile(abs, req.Content, mode); err != nil {
 		// Last-write-wins must also beat a read-only target: an existing file
 		// without the owner write bit (git pack files are 0444) makes the
 		// O_WRONLY open fail EACCES — and since the flush queue drains strictly
@@ -186,7 +262,11 @@ func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
 		_ = os.Chtimes(abs, t, t)
 	}
 	ack.OK = true
-	ack.NewHash = hashx.Bytes(req.Content)
+	if staged {
+		ack.NewHash, _ = hashx.File(abs)
+	} else {
+		ack.NewHash = hashx.Bytes(req.Content)
+	}
 	if info, err := os.Stat(abs); err == nil {
 		ack.SourceMod = info.ModTime().Unix()
 	}
@@ -319,43 +399,133 @@ func (fs *FileServer) list(rel string) (proto.ListResp, error) {
 	return out, nil
 }
 
-// tree walks the entire remote root and returns one TreeEntry per file/dir
-// (honoring .lgignore), so Ghost can render the whole mount eagerly. Content
-// hashes are left empty here — walking 50k files to hash them all would be slow;
+// treeWalkWorkers bounds concurrent directory listings during the full walk.
+// The walk is NFS-latency-bound (~1ms per stat serially — 100k+ entries took
+// minutes), so a modest pool gives a near-linear speedup without hammering
+// the file server.
+const treeWalkWorkers = 16
+
+// defaultTreePageSize is entries per TreeResp page: ~25k entries is a few MB
+// of JSON, well under 1 MB gzipped — comfortably inside the frame cap however
+// big the tree grows.
+const defaultTreePageSize = 25000
+
+// treePage serves one page of the full-tree snapshot (see proto.TreeReq).
+// Cursor 0 walks fresh, digests the result, and answers Unchanged when Ghost
+// already holds this exact tree; later cursors serve the pages that walk
+// saved. Content hashes are left empty — hashing 50k files would be slow;
 // Ghost fills the hash lazily on first read (OneDrive-style).
-func (fs *FileServer) tree() (proto.TreeResp, error) {
-	var out proto.TreeResp
-	err := filepath.WalkDir(fs.root, func(abs string, d os.DirEntry, err error) error {
+func (fs *FileServer) treePage(req proto.TreeReq) (proto.TreeResp, error) {
+	fs.treeMu.Lock()
+	defer fs.treeMu.Unlock()
+
+	if req.Cursor > 0 {
+		if req.Digest != fs.treeDigest {
+			// A newer walk replaced the snapshot mid-download (or the agent
+			// restarted); Ghost restarts the sync from cursor 0 on its next tick.
+			return proto.TreeResp{}, fmt.Errorf("tree snapshot expired; resync from cursor 0")
+		}
+		if req.Cursor >= len(fs.treePages) {
+			return proto.TreeResp{}, fmt.Errorf("tree page %d out of range (%d pages)", req.Cursor, len(fs.treePages))
+		}
+		return proto.TreeResp{Digest: fs.treeDigest, Pages: len(fs.treePages), Gz: fs.treePages[req.Cursor]}, nil
+	}
+
+	entries := fs.walkTree()
+
+	// Digest the walked entries (not their gzip encoding) so identity is
+	// stable. Any metadata change anywhere in the tree changes the digest.
+	h := sha256.New()
+	henc := json.NewEncoder(h)
+	for i := range entries {
+		_ = henc.Encode(&entries[i])
+	}
+	digest := hex.EncodeToString(h.Sum(nil))
+	if digest == req.Digest {
+		return proto.TreeResp{Unchanged: true, Digest: digest}, nil
+	}
+
+	pageSize := fs.treePageSize
+	if pageSize <= 0 {
+		pageSize = defaultTreePageSize
+	}
+	var pages [][]byte
+	for start := 0; ; start += pageSize {
+		end := min(start+pageSize, len(entries))
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		if err := json.NewEncoder(zw).Encode(entries[start:end]); err != nil {
+			return proto.TreeResp{}, err
+		}
+		if err := zw.Close(); err != nil {
+			return proto.TreeResp{}, err
+		}
+		pages = append(pages, buf.Bytes())
+		if end == len(entries) {
+			break
+		}
+	}
+	fs.treeDigest, fs.treePages = digest, pages
+	return proto.TreeResp{Digest: digest, Pages: len(pages), Gz: pages[0]}, nil
+}
+
+// walkTree lists the entire remote root (honoring .lgignore) with parallel
+// per-directory workers, sorted by Rel so the digest is stable across walks.
+// Unreadable paths are skipped rather than aborting the walk, as before.
+func (fs *FileServer) walkTree() []proto.TreeEntry {
+	var (
+		mu      sync.Mutex
+		entries []proto.TreeEntry
+		wg      sync.WaitGroup
+		sem     = make(chan struct{}, treeWalkWorkers)
+	)
+	var walk func(dir string)
+	walk = func(dir string) {
+		defer wg.Done()
+		ents, err := os.ReadDir(dir)
 		if err != nil {
-			return nil // skip unreadable paths rather than aborting the whole walk
+			return
 		}
-		rel, rerr := fs.mapper.RemoteToRel(abs)
-		if rerr != nil {
-			return nil
-		}
-		if rel == "" || rel == "." {
-			return nil // don't emit the root itself
-		}
-		if fs.matcher != nil && fs.matcher.Match(rel, d.IsDir()) {
-			if d.IsDir() {
-				return filepath.SkipDir
+		local := make([]proto.TreeEntry, 0, len(ents))
+		for _, d := range ents {
+			abs := filepath.Join(dir, d.Name())
+			rel, rerr := fs.mapper.RemoteToRel(abs)
+			if rerr != nil || rel == "" || rel == "." {
+				continue
 			}
-			return nil
+			if fs.matcher != nil && fs.matcher.Match(rel, d.IsDir()) {
+				continue // ignored: don't emit, don't descend
+			}
+			info, ierr := d.Info()
+			if ierr != nil {
+				continue
+			}
+			local = append(local, proto.TreeEntry{
+				Rel:     rel,
+				IsDir:   d.IsDir(),
+				Size:    info.Size(),
+				ModTime: info.ModTime().Unix(),
+				Mode:    uint32(info.Mode().Perm()),
+			})
+			if d.IsDir() {
+				wg.Add(1)
+				select {
+				case sem <- struct{}{}: // worker slot free: descend concurrently
+					go func(p string) { defer func() { <-sem }(); walk(p) }(abs)
+				default: // pool saturated: descend inline
+					walk(abs)
+				}
+			}
 		}
-		info, ierr := d.Info()
-		if ierr != nil {
-			return nil
-		}
-		out.Entries = append(out.Entries, proto.TreeEntry{
-			Rel:     rel,
-			IsDir:   d.IsDir(),
-			Size:    info.Size(),
-			ModTime: info.ModTime().Unix(),
-			Mode:    uint32(info.Mode().Perm()),
-		})
-		return nil
-	})
-	return out, err
+		mu.Lock()
+		entries = append(entries, local...)
+		mu.Unlock()
+	}
+	wg.Add(1)
+	walk(fs.root)
+	wg.Wait()
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Rel < entries[j].Rel })
+	return entries
 }
 
 func copyFile(src, dst string) error {

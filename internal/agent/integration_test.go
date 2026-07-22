@@ -125,20 +125,37 @@ func TestEndToEndOverPipe(t *testing.T) {
 		t.Fatalf("written file=%q err=%v", got, err)
 	}
 
-	// Full-tree metadata: the whole tree comes back in one request, including the
-	// file we just wrote — the OneDrive-style eager listing.
+	// Full-tree metadata: the snapshot comes back as gzipped pages (one page
+	// for a tree this small), including the file we just wrote — the
+	// OneDrive-style eager listing.
 	treeF, err := file.Call(ctx, proto.TypeTreeReq, proto.TreeReq{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var tr proto.TreeResp
 	proto.Unmarshal(treeF.Body, &tr)
+	if tr.Unchanged || tr.Pages != 1 || tr.Digest == "" {
+		t.Fatalf("tree resp=%+v", tr)
+	}
+	entries := decodeTreePageT(t, tr.Gz)
 	seen := map[string]bool{}
-	for _, e := range tr.Entries {
+	for _, e := range entries {
 		seen[e.Rel] = true
 	}
 	if !seen["hello.txt"] || !seen["sub/new.txt"] || !seen["sub"] {
-		t.Fatalf("tree missing entries: %+v", tr.Entries)
+		t.Fatalf("tree missing entries: %+v", entries)
+	}
+
+	// Digest short-circuit: asking again with the digest we now hold moves no
+	// entries at all.
+	treeF, err = file.Call(ctx, proto.TypeTreeReq, proto.TreeReq{Digest: tr.Digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tr2 proto.TreeResp
+	proto.Unmarshal(treeF.Body, &tr2)
+	if !tr2.Unchanged || len(tr2.Gz) != 0 {
+		t.Fatalf("expected Unchanged, got %+v", tr2)
 	}
 
 	// Command runner: run a command in a remote PTY and read its output back.

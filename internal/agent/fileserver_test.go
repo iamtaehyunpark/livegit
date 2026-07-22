@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -184,5 +187,171 @@ func TestWriteReadOnlyTargetAndModeChange(t *testing.T) {
 	}
 	if info, _ := os.Stat(abs); info.Mode().Perm() != 0o644 {
 		t.Fatalf("mode = %o, want 0644", info.Mode().Perm())
+	}
+}
+
+// decodeTreePageT gunzips + decodes one TreeResp page (test helper, shared
+// with the integration test).
+func decodeTreePageT(t *testing.T, gz []byte) []proto.TreeEntry {
+	t.Helper()
+	zr, err := gzip.NewReader(bytes.NewReader(gz))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	var out []proto.TreeEntry
+	if err := json.NewDecoder(zr).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// Reads are served in bounded chunks: offsets walk the file, More flags the
+// tail, and the concatenation reproduces the exact content.
+func TestReadChunked(t *testing.T) {
+	root := t.TempDir()
+	fs := NewFileServer(root, nil)
+	content := []byte("0123456789") // 10 bytes, MaxLen 4 -> chunks of 4/4/2
+	if err := os.WriteFile(filepath.Join(root, "f.bin"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []byte
+	off := int64(0)
+	for i := 0; ; i++ {
+		resp, err := fs.read(proto.ReadReq{Rel: "f.bin", Offset: off, MaxLen: 4})
+		if err != nil || !resp.Found {
+			t.Fatalf("chunk %d: resp=%+v err=%v", i, resp, err)
+		}
+		if resp.Size != int64(len(content)) {
+			t.Fatalf("chunk %d: size=%d want %d", i, resp.Size, len(content))
+		}
+		got = append(got, resp.Content...)
+		off += int64(len(resp.Content))
+		if !resp.More {
+			break
+		}
+		if i > 5 {
+			t.Fatal("chunk loop did not terminate")
+		}
+	}
+	if string(got) != string(content) {
+		t.Fatalf("reassembled=%q want %q", got, content)
+	}
+
+	// Offset past EOF (file shrank between chunks): empty final chunk, no error.
+	resp, err := fs.read(proto.ReadReq{Rel: "f.bin", Offset: 99, MaxLen: 4})
+	if err != nil || resp.More || len(resp.Content) != 0 {
+		t.Fatalf("past-EOF read: resp=%+v err=%v", resp, err)
+	}
+}
+
+// A chunked write stages into a sidecar (never a half-written real file) and
+// the final chunk commits atomically with the usual conflict/mode/mtime logic.
+func TestWriteChunked(t *testing.T) {
+	root := t.TempDir()
+	fs := NewFileServer(root, nil)
+
+	chunks := []proto.WriteReq{
+		{Rel: "big.bin", Content: []byte("aaaa"), Offset: 0, More: true, Mode: 0o644},
+		{Rel: "big.bin", Content: []byte("bbbb"), Offset: 4, More: true, Mode: 0o644},
+		{Rel: "big.bin", Content: []byte("cc"), Offset: 8, More: false, Mode: 0o644, ModTime: 1700000000},
+	}
+	for i, c := range chunks {
+		ack, err := fs.write(c)
+		if err != nil || !ack.OK {
+			t.Fatalf("chunk %d: ack=%+v err=%v", i, ack, err)
+		}
+		if c.More {
+			if _, err := os.Stat(filepath.Join(root, "big.bin")); !os.IsNotExist(err) {
+				t.Fatalf("chunk %d: real file must not exist before commit", i)
+			}
+		}
+	}
+	got, err := os.ReadFile(filepath.Join(root, "big.bin"))
+	if err != nil || string(got) != "aaaabbbbcc" {
+		t.Fatalf("committed=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "big.bin.lg-part")); !os.IsNotExist(err) {
+		t.Fatal("staging sidecar must be gone after commit")
+	}
+
+	// A chunk that skips ahead (lost predecessor) must fail the write so the
+	// Ghost restarts it, never silently commit a file with a hole.
+	if _, err := fs.write(proto.WriteReq{Rel: "gap.bin", Content: []byte("x"), Offset: 0, More: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.write(proto.WriteReq{Rel: "gap.bin", Content: []byte("z"), Offset: 5, More: false}); err == nil {
+		t.Fatal("gapped chunk must error")
+	}
+	if _, err := os.Stat(filepath.Join(root, "gap.bin")); !os.IsNotExist(err) {
+		t.Fatal("gapped write must not commit")
+	}
+}
+
+// The tree snapshot pages correctly, honors ignores, answers Unchanged for a
+// matching digest, and rejects pages of an expired snapshot.
+func TestTreePagingAndDigest(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{"a.txt", "b.txt", "sub/c.txt", "sub/d.txt", ".venv/skip.txt"} {
+		abs := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(p), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fs := NewFileServer(root, config.NewMatcher([]string{".venv/"}))
+	fs.treePageSize = 2
+
+	first, err := fs.treePage(proto.TreeReq{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Unchanged || first.Digest == "" || first.Pages < 2 {
+		t.Fatalf("first page resp=%+v", first)
+	}
+	entries := decodeTreePageT(t, first.Gz)
+	for cur := 1; cur < first.Pages; cur++ {
+		page, err := fs.treePage(proto.TreeReq{Digest: first.Digest, Cursor: cur})
+		if err != nil {
+			t.Fatalf("page %d: %v", cur, err)
+		}
+		entries = append(entries, decodeTreePageT(t, page.Gz)...)
+	}
+	seen := map[string]bool{}
+	for i, e := range entries {
+		seen[e.Rel] = true
+		if i > 0 && entries[i-1].Rel >= e.Rel {
+			t.Fatalf("entries not sorted: %q then %q", entries[i-1].Rel, e.Rel)
+		}
+	}
+	for _, want := range []string{"a.txt", "b.txt", "sub", "sub/c.txt", "sub/d.txt"} {
+		if !seen[want] {
+			t.Fatalf("missing %q in %+v", want, entries)
+		}
+	}
+	if seen[".venv/skip.txt"] || seen[".venv"] {
+		t.Fatal("ignored path leaked into the tree")
+	}
+
+	// Same tree, digest echoed back: Unchanged, no page data.
+	again, err := fs.treePage(proto.TreeReq{Digest: first.Digest})
+	if err != nil || !again.Unchanged || len(again.Gz) != 0 {
+		t.Fatalf("unchanged resp=%+v err=%v", again, err)
+	}
+
+	// A change breaks the digest and produces a fresh snapshot; pages of the
+	// old snapshot are then refused.
+	if err := os.WriteFile(filepath.Join(root, "e.txt"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := fs.treePage(proto.TreeReq{Digest: first.Digest})
+	if err != nil || fresh.Unchanged || fresh.Digest == first.Digest {
+		t.Fatalf("post-change resp=%+v err=%v", fresh, err)
+	}
+	if _, err := fs.treePage(proto.TreeReq{Digest: first.Digest, Cursor: 1}); err == nil {
+		t.Fatal("stale-digest page fetch must error")
 	}
 }

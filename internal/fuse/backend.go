@@ -22,7 +22,10 @@ type SourceRPC interface {
 	Read(ctx context.Context, rel string) (proto.ReadResp, error)
 	Write(ctx context.Context, req proto.WriteReq) (proto.WriteAck, error)
 	Delete(ctx context.Context, req proto.DelReq) (proto.DelAck, error)
-	Tree(ctx context.Context) ([]proto.TreeEntry, error)
+	// Tree fetches the full snapshot. haveDigest is the digest of the tree the
+	// caller already applied; when Source's walk still matches it, Tree returns
+	// unchanged=true (and nil entries) instead of re-shipping everything.
+	Tree(ctx context.Context, haveDigest string) (entries []proto.TreeEntry, digest string, unchanged bool, err error)
 	Online() bool
 }
 
@@ -44,6 +47,11 @@ type Backend struct {
 	// xattrs holds Finder/macOS extended attributes in memory, per mount
 	// session — never synced to Source. See xattr.go for why this exists.
 	xattrs xattrStore
+
+	// treeDigest identifies the last tree snapshot applied by SyncTree, echoed
+	// to Source so an unchanged tree costs no transfer. Only the RunTreeSync
+	// goroutine touches it.
+	treeDigest string
 
 	// synced flips true after the first successful full-tree sync. From then on
 	// the index is authoritative for negatives: Getattr answers ENOENT locally
@@ -102,9 +110,17 @@ func (b *Backend) SyncTree(ctx context.Context) error {
 	// snapshot but still present in the fetched tree — without the union it
 	// would be resurrected from the stale tree until the next refresh.
 	pend := b.journal.PendingSnapshot()
-	entries, err := b.source.Tree(ctx)
+	entries, digest, unchanged, err := b.source.Tree(ctx, b.treeDigest)
 	if err != nil {
 		return err
+	}
+	if unchanged {
+		// Source's walk matched the tree we already applied: skip the Replace,
+		// the stale-content scan, and the tree.json rewrite entirely. The
+		// digest covers every entry's size/mtime, so any Source-side change —
+		// including one the watcher missed — breaks it and forces a full fetch.
+		b.log.Debug("tree unchanged")
+		return nil
 	}
 	pend = append(pend, b.journal.PendingSnapshot()...)
 
@@ -159,6 +175,7 @@ func (b *Backend) SyncTree(ctx context.Context) error {
 		b.log.Debug("refresh dropped stale cached content", "rel", rel)
 	}
 
+	b.treeDigest = digest
 	if b.synced.CompareAndSwap(false, true) {
 		b.log.Info("tree synced", "entries", len(entries))
 	} else {
@@ -186,7 +203,10 @@ func (b *Backend) RunTreeSync(ctx context.Context) {
 		if !b.source.Online() {
 			lastSync = time.Time{} // offline: re-sync immediately on reconnect
 		} else if time.Since(lastSync) >= interval {
-			sctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			// Generous deadline: the first sync of a 1M+ entry tree is a real
+			// walk plus a paged transfer. A dead link doesn't hang this long —
+			// connection loss aborts the in-flight call immediately.
+			sctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			start := time.Now()
 			err := b.SyncTree(sctx)
 			cancel()

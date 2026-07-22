@@ -95,7 +95,7 @@ func (s *fakeSource) Delete(_ context.Context, req proto.DelReq) (proto.DelAck, 
 	return proto.DelAck{OK: true}, nil
 }
 
-func (s *fakeSource) Tree(_ context.Context) ([]proto.TreeEntry, error) {
+func (s *fakeSource) Tree(_ context.Context, _ string) ([]proto.TreeEntry, string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []proto.TreeEntry
@@ -105,7 +105,8 @@ func (s *fakeSource) Tree(_ context.Context) ([]proto.TreeEntry, error) {
 			Mode: f.mode, Hash: hashx.Bytes(f.content),
 		})
 	}
-	return out, nil
+	// Never report "unchanged": the tests exercise the full Replace path.
+	return out, "fake-digest", false, nil
 }
 
 // harness wires a Backend over a temp LG_HOME with a fake source.
