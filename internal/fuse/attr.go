@@ -54,7 +54,7 @@ func (b *Backend) Getattr(ctx context.Context, rel string) (Attr, error) {
 		return Attr{Exists: false}, nil
 	}
 	b.index.Put(&Entry{
-		Rel: rel, IsDir: st.IsDir, Size: st.Size, ModTime: st.ModTime, Mode: st.Mode, Hash: st.Hash,
+		Rel: rel, IsDir: st.IsDir, Size: st.Size, ModTime: st.ModTime, Mode: st.Mode,
 	})
 	return Attr{Exists: true, IsDir: st.IsDir, Size: st.Size, ModTime: st.ModTime, Mode: st.Mode}, nil
 }

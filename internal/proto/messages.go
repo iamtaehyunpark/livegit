@@ -78,7 +78,6 @@ type FileStat struct {
 	Size    int64
 	ModTime int64 // unix seconds
 	Mode    uint32
-	Hash    string // content hash (empty for dirs)
 }
 
 type StatReq struct{ Rel string }

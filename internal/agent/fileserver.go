@@ -101,11 +101,10 @@ func (fs *FileServer) stat(rel string) proto.FileStat {
 	st.Size = info.Size()
 	st.ModTime = info.ModTime().Unix()
 	st.Mode = uint32(info.Mode().Perm())
-	if !info.IsDir() {
-		if h, err := hashx.File(fs.abs(rel)); err == nil {
-			st.Hash = h
-		}
-	}
+	// Deliberately no content hash: hashing here read the ENTIRE file per stat
+	// RPC (multi-second Getattr + full disk read for a 200MB+ file). Nothing
+	// needs it — tree-sync entries carry no hash either, and conflict-detection
+	// hashes come from the read/flush paths.
 	return st
 }
 

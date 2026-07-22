@@ -65,7 +65,7 @@ func (s *fakeSource) Stat(_ context.Context, rel string) (proto.FileStat, error)
 		return proto.FileStat{Rel: rel}, nil
 	}
 	return proto.FileStat{Rel: rel, Exists: true, Size: int64(len(f.content)),
-		ModTime: f.mod, Mode: f.mode, Hash: hashx.Bytes(f.content)}, nil
+		ModTime: f.mod, Mode: f.mode}, nil
 }
 
 func (s *fakeSource) Read(_ context.Context, rel string) (proto.ReadResp, error) {
