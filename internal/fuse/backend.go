@@ -25,6 +25,7 @@ type SourceRPC interface {
 	ReadStream(ctx context.Context, rel string, sink func(chunk []byte) error) (proto.FileStat, error)
 	Write(ctx context.Context, req proto.WriteReq) (proto.WriteAck, error)
 	Delete(ctx context.Context, req proto.DelReq) (proto.DelAck, error)
+	Rename(ctx context.Context, req proto.RenameReq) (proto.RenameAck, error)
 	// Tree fetches the full snapshot. haveDigest is the digest of the tree the
 	// caller already applied; when Source's walk still matches it, Tree returns
 	// unchanged=true (and nil entries) instead of re-shipping everything.
@@ -365,10 +366,79 @@ func (b *Backend) RecordRename(ctx context.Context, oldRel, newRel string) error
 	// Move session-local xattrs along. Done up front: if the rename fails
 	// mid-way, losing Finder bookkeeping attrs is harmless.
 	b.xattrRename(oldRel, newRel)
-	if e, ok := b.index.Get(oldRel); ok && e.IsDir {
+
+	entry, _ := b.index.Get(oldRel)
+	isDir := entry != nil && entry.IsDir
+
+	// FAST PATH: everything under oldRel is already on Source (no unflushed
+	// local truth) and Source is reachable — one RPC moves it server-side, no
+	// content crosses the wire. Without this, dragging a multi-GB directory
+	// downloaded and re-uploaded every byte and froze the mount for minutes.
+	// A FILE with pending local truth skips this deliberately: that's the
+	// editor atomic-save (tmp → target), whose bytes are already in the cache —
+	// the journal path handles it instantly, no upload wait.
+	if b.source.Online() {
+		pend := b.journal.PendingForDir(oldRel)
+		if pend && isDir {
+			// Queued edits under the source dir would flush to the OLD names
+			// after a server-side move (recreating them); give them a moment
+			// to land, then re-check.
+			_ = b.FlushBarrier(ctx, oldRel, 10*time.Second)
+			pend = b.journal.PendingForDir(oldRel)
+		}
+		if !pend {
+			ack, err := b.source.Rename(ctx, proto.RenameReq{OldRel: oldRel, NewRel: newRel})
+			if err == nil && ack.OK {
+				b.applyLocalRename(oldRel, newRel)
+				return nil
+			}
+			if err == nil {
+				b.log.Warn("source declined rename; using copy+delete",
+					"old", oldRel, "new", newRel, "msg", ack.Message)
+			} else {
+				b.log.Warn("rename rpc failed; using copy+delete", "err", err)
+			}
+		}
+	}
+
+	// SLOW PATH (offline, unflushed edits under the source, or Source declined):
+	// per-file copy+delete via the journal, as before.
+	if isDir {
 		return b.recordRenameDir(ctx, oldRel, newRel)
 	}
 	return b.recordRenameFile(ctx, oldRel, newRel)
+}
+
+// applyLocalRename mirrors a completed Source-side rename locally: cached
+// bytes move with one os.Rename (file or whole subtree), and every index entry
+// under oldRel re-registers at its new path with metadata intact — Hash and
+// HaveContent preserved, so the watcher's echo of the remote rename compares
+// equal and does not drop the just-moved cache.
+func (b *Backend) applyLocalRename(oldRel, newRel string) {
+	oldCache, newCache := b.cachePath(oldRel), b.cachePath(newRel)
+	if err := os.MkdirAll(filepath.Dir(newCache), 0o755); err == nil {
+		_ = os.Remove(newCache) // stale dest cache file, if any
+		_ = os.Rename(oldCache, newCache)
+	}
+	// Snapshot the subtree before mutating the index.
+	type moved struct{ old, new string }
+	var list []moved
+	var walk func(old, new string)
+	walk = func(old, new string) {
+		list = append(list, moved{old, new})
+		for _, c := range b.index.Children(old) {
+			walk(config.Rel(old+"/"+c.Name), config.Rel(new+"/"+c.Name))
+		}
+	}
+	walk(oldRel, newRel)
+	for _, m := range list {
+		if e, ok := b.index.Get(m.old); ok {
+			ne := *e
+			ne.Rel = m.new
+			b.index.Put(&ne)
+		}
+	}
+	b.index.Remove(oldRel) // recursive: drops the whole old subtree
 }
 
 // recordRenameFile moves a single file's bytes to the destination and journals

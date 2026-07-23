@@ -47,6 +47,16 @@ func (s *clientSource) Write(ctx context.Context, req proto.WriteReq) (proto.Wri
 	return writeChunked(ctx, s.c.FileCall, req, proto.ChunkSize)
 }
 
+func (s *clientSource) Rename(ctx context.Context, req proto.RenameReq) (proto.RenameAck, error) {
+	f, err := s.c.FileCall(ctx, proto.TypeRenameReq, req)
+	if err != nil {
+		return proto.RenameAck{}, err
+	}
+	var ack proto.RenameAck
+	err = proto.Unmarshal(f.Body, &ack)
+	return ack, err
+}
+
 func (s *clientSource) Delete(ctx context.Context, req proto.DelReq) (proto.DelAck, error) {
 	f, err := s.c.FileCall(ctx, proto.TypeDelReq, req)
 	if err != nil {

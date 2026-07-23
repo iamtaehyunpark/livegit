@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,7 +20,9 @@ type fakeSource struct {
 	mu        sync.Mutex
 	files     map[string]fakeFile
 	online    bool
-	statCalls int // counts Stat RPCs (negative lookups must not hit the network post-sync)
+	statCalls     int  // counts Stat RPCs (negative lookups must not hit the network post-sync)
+	renameCalls   int  // counts Rename RPCs (big moves must be server-side, not copy+delete)
+	renameDecline bool // make Rename RPCs decline, forcing the copy+delete fallback
 
 	// readGate, when set, makes ReadStream deliver content in two chunks and
 	// block between them until the gate closes (or ctx cancels) — simulates a
@@ -113,6 +116,27 @@ func (s *fakeSource) Write(_ context.Context, req proto.WriteReq) (proto.WriteAc
 	}
 	s.files[req.Rel] = fakeFile{content: req.Content, mode: req.Mode, mod: req.ModTime}
 	return proto.WriteAck{OK: true, NewHash: hashx.Bytes(req.Content), SourceMod: req.ModTime}, nil
+}
+
+func (s *fakeSource) Rename(_ context.Context, req proto.RenameReq) (proto.RenameAck, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.renameCalls++
+	if s.renameDecline {
+		return proto.RenameAck{Message: "declined by test"}, nil
+	}
+	moved := false
+	for rel, f := range s.files {
+		if rel == req.OldRel || strings.HasPrefix(rel, req.OldRel+"/") {
+			delete(s.files, rel)
+			s.files[req.NewRel+rel[len(req.OldRel):]] = f
+			moved = true
+		}
+	}
+	if !moved {
+		return proto.RenameAck{Message: "source missing"}, nil
+	}
+	return proto.RenameAck{OK: true}, nil
 }
 
 func (s *fakeSource) Delete(_ context.Context, req proto.DelReq) (proto.DelAck, error) {
@@ -489,34 +513,45 @@ func TestRenameAtomicSave(t *testing.T) {
 	}
 }
 
-func TestRenameUnopenedFileMaterializes(t *testing.T) {
+func TestRenameUnopenedFileServerSide(t *testing.T) {
 	b, src := harness(t)
 	src.put("README.md", "# docs\n")
 	if err := b.SyncTree(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	// Rename a file that was synced from Source but never opened (no cached bytes).
+	// Rename a file that was synced from Source but never opened: the move
+	// must happen server-side via ONE RPC — no download, no journal traffic.
 	if err := b.RecordRename(context.Background(), "README.md", "README2.md"); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(b.cachePath("README2.md"))
-	if err != nil || string(got) != "# docs\n" {
-		t.Fatalf("renamed content=%q err=%v", got, err)
+	if src.renameCalls != 1 {
+		t.Fatalf("renameCalls=%d, want 1 (server-side move)", src.renameCalls)
 	}
-	for {
-		e, ok := b.journal.Peek()
-		if !ok {
-			break
-		}
-		if err := b.flushEntry(context.Background(), e); err != nil {
-			t.Fatal(err)
-		}
+	if b.journal.PendingCount() != 0 {
+		t.Fatalf("server-side rename must not journal, %d pending", b.journal.PendingCount())
+	}
+	if cacheFileExists(b.cachePath("README2.md")) {
+		t.Fatal("no content must be downloaded just to move a file")
 	}
 	if _, ok := src.get("README.md"); ok {
-		t.Fatal("old name should be deleted on source")
+		t.Fatal("old name should be gone on source")
 	}
 	if f, _ := src.get("README2.md"); string(f.content) != "# docs\n" {
 		t.Fatalf("source README2.md=%q", f.content)
+	}
+	// Index follows the move; content still fetches on demand at the new name.
+	if _, ok := b.index.Get("README.md"); ok {
+		t.Fatal("old index entry should be gone")
+	}
+	if e, ok := b.index.Get("README2.md"); !ok || e.IsDir {
+		t.Fatalf("new index entry missing/wrong: %+v ok=%v", e, ok)
+	}
+	cp, err := b.Materialize(context.Background(), "README2.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(cp); string(got) != "# docs\n" {
+		t.Fatalf("materialized content=%q", got)
 	}
 }
 
@@ -564,6 +599,9 @@ func TestRenameDirDeletesSubdirsBottomUp(t *testing.T) {
 	if err := b.SyncTree(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	// Pin the copy+delete FALLBACK (Source declining the rename RPC) — that's
+	// the path whose bottom-up delete ordering this test guards.
+	src.renameDecline = true
 	if err := b.RecordRename(context.Background(), "old", "new"); err != nil {
 		t.Fatal(err)
 	}
@@ -924,5 +962,53 @@ func TestEvictIdleContent(t *testing.T) {
 	// Still listed and refetchable: the metadata index is untouched.
 	if _, err := b.Materialize(ctx, "old.txt"); err != nil {
 		t.Fatalf("refetch after idle eviction: %v", err)
+	}
+}
+
+// A directory rename with everything synced must be ONE server-side RPC — no
+// downloads, no journal entries — with cached content and index metadata
+// (including HaveContent/Hash, which guard against the watcher's rename echo
+// dropping the cache) moving to the new paths.
+func TestRenameDirServerSide(t *testing.T) {
+	b, src := harness(t)
+	src.put("old/a.txt", "aaa")
+	src.put("old/sub/b.txt", "bbb")
+	ctx := context.Background()
+	if err := b.SyncTree(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Materialize(ctx, "old/sub/b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	hashBefore := ""
+	if e, ok := b.index.Get("old/sub/b.txt"); ok {
+		hashBefore = e.Hash
+	}
+
+	if err := b.RecordRename(ctx, "old", "new"); err != nil {
+		t.Fatal(err)
+	}
+	if src.renameCalls != 1 {
+		t.Fatalf("renameCalls=%d, want 1", src.renameCalls)
+	}
+	if b.journal.PendingCount() != 0 {
+		t.Fatalf("server-side dir rename must not journal, %d pending", b.journal.PendingCount())
+	}
+	if _, ok := src.get("new/sub/b.txt"); !ok {
+		t.Fatal("source subtree should be at the new path")
+	}
+	if _, ok := src.get("old/a.txt"); ok {
+		t.Fatal("source old subtree should be gone")
+	}
+	// Cached bytes moved with the subtree, and the entry kept its hash.
+	if got, err := os.ReadFile(b.cachePath("new/sub/b.txt")); err != nil || string(got) != "bbb" {
+		t.Fatalf("moved cache=%q err=%v", got, err)
+	}
+	e, ok := b.index.Get("new/sub/b.txt")
+	if !ok || !e.HaveContent || e.Hash != hashBefore {
+		t.Fatalf("moved entry=%+v ok=%v (want HaveContent, hash %q)", e, ok, hashBefore)
+	}
+	if _, ok := b.index.Get("old"); ok {
+		t.Fatal("old subtree should be gone from the index")
 	}
 }

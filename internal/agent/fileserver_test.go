@@ -355,3 +355,42 @@ func TestTreePagingAndDigest(t *testing.T) {
 		t.Fatal("stale-digest page fetch must error")
 	}
 }
+
+// rename moves files and whole directories in place; a missing source or an
+// occupied destination declines with OK=false (no error — an error would read
+// as a transport failure and tear down the ghost's fallback logic).
+func TestRenameInPlace(t *testing.T) {
+	root := t.TempDir()
+	fs := NewFileServer(root, nil)
+	for _, p := range []string{"d/a.txt", "d/sub/b.txt", "solo.txt"} {
+		abs := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(p), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ack, err := fs.rename(proto.RenameReq{OldRel: "d", NewRel: "moved/d2"})
+	if err != nil || !ack.OK {
+		t.Fatalf("dir rename ack=%+v err=%v", ack, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "moved/d2/sub/b.txt")); err != nil || string(got) != "d/sub/b.txt" {
+		t.Fatalf("moved content=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "d")); !os.IsNotExist(err) {
+		t.Fatal("old dir must be gone")
+	}
+
+	ack, err = fs.rename(proto.RenameReq{OldRel: "ghost.txt", NewRel: "x.txt"})
+	if err != nil || ack.OK {
+		t.Fatalf("missing source must decline, ack=%+v err=%v", ack, err)
+	}
+
+	// Renaming onto a non-empty directory declines rather than clobbering it.
+	ack, err = fs.rename(proto.RenameReq{OldRel: "solo.txt", NewRel: "moved/d2"})
+	if err != nil || ack.OK {
+		t.Fatalf("occupied destination must decline, ack=%+v err=%v", ack, err)
+	}
+}

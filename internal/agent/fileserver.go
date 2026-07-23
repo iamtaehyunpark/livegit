@@ -73,6 +73,11 @@ func (fs *FileServer) Handle(f proto.Frame) (proto.MsgType, any, bool, error) {
 		_ = proto.Unmarshal(f.Body, &req)
 		ack, err := fs.del(req)
 		return proto.TypeDelAck, ack, true, err
+	case proto.TypeRenameReq:
+		var req proto.RenameReq
+		_ = proto.Unmarshal(f.Body, &req)
+		ack, err := fs.rename(req)
+		return proto.TypeRenameAck, ack, true, err
 	case proto.TypeListReq:
 		var req proto.ListReq
 		_ = proto.Unmarshal(f.Body, &req)
@@ -270,6 +275,24 @@ func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
 		ack.SourceMod = info.ModTime().Unix()
 	}
 	return ack, nil
+}
+
+// rename moves a file or directory in place on Source. Declines (OK=false, no
+// error — an error would look like a transport failure to Ghost) when the move
+// can't apply, e.g. the source is gone or the destination is a non-empty dir.
+func (fs *FileServer) rename(req proto.RenameReq) (proto.RenameAck, error) {
+	oldAbs, newAbs := fs.abs(req.OldRel), fs.abs(req.NewRel)
+	if _, err := os.Lstat(oldAbs); err != nil {
+		return proto.RenameAck{Message: fmt.Sprintf("source missing: %v", err)}, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(newAbs), 0o755); err != nil {
+		return proto.RenameAck{}, err
+	}
+	if err := os.Rename(oldAbs, newAbs); err != nil {
+		return proto.RenameAck{Message: err.Error()}, nil
+	}
+	fs.log.Info("renamed", "old", req.OldRel, "new", req.NewRel)
+	return proto.RenameAck{OK: true}, nil
 }
 
 func (fs *FileServer) del(req proto.DelReq) (proto.DelAck, error) {

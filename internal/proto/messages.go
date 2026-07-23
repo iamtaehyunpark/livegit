@@ -24,8 +24,10 @@ const (
 	TypeWriteAck MsgType = 15
 	TypeDelReq   MsgType = 16
 	TypeDelAck   MsgType = 17
-	TypeListReq  MsgType = 18 // directory listing
-	TypeListResp MsgType = 19
+	TypeListReq   MsgType = 18 // directory listing
+	TypeListResp  MsgType = 19
+	TypeRenameReq MsgType = 22 // server-side move: no content crosses the wire
+	TypeRenameAck MsgType = 23
 
 	// Full-tree metadata sync (Ghost -> Source over the file-RPC stream).
 	TypeTreeReq  MsgType = 20 // request the entire remote tree's metadata
@@ -124,6 +126,18 @@ type WriteAck struct {
 	NewHash   string // resulting content hash on Source
 	SourceMod int64  // Source's modtime after apply
 	Message   string
+}
+
+// RenameReq moves a file or whole directory ON Source (os.Rename — instant
+// for any size). Before this RPC a move was modeled as download + re-upload
+// per file, which froze the mount for minutes on a multi-GB directory drag.
+type RenameReq struct {
+	OldRel string
+	NewRel string
+}
+type RenameAck struct {
+	OK      bool
+	Message string // why Source declined (e.g. destination not empty)
 }
 
 type DelReq struct {
