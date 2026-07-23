@@ -6,6 +6,7 @@ package hashx
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"hash"
 	"io"
 	"os"
 )
@@ -32,3 +33,10 @@ func File(path string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+// New returns a streaming hasher producing the same identity as Bytes/File;
+// finish with Sum.
+func New() hash.Hash { return sha256.New() }
+
+// Sum finalizes a hasher from New into the canonical hex form.
+func Sum(h hash.Hash) string { return hex.EncodeToString(h.Sum(nil)) }

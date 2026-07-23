@@ -20,6 +20,11 @@ type fakeSource struct {
 	files     map[string]fakeFile
 	online    bool
 	statCalls int // counts Stat RPCs (negative lookups must not hit the network post-sync)
+
+	// readGate, when set, makes ReadStream deliver content in two chunks and
+	// block between them until the gate closes (or ctx cancels) — simulates a
+	// slow download for the progressive-read and unmount-abort tests.
+	readGate chan struct{}
 }
 
 type fakeFile struct {
@@ -68,13 +73,35 @@ func (s *fakeSource) Stat(_ context.Context, rel string) (proto.FileStat, error)
 		ModTime: f.mod, Mode: f.mode}, nil
 }
 
-func (s *fakeSource) Read(_ context.Context, rel string) (proto.ReadResp, error) {
+func (s *fakeSource) ReadStream(ctx context.Context, rel string, sink func([]byte) error) (proto.FileStat, error) {
 	f, ok := s.get(rel)
 	if !ok {
-		return proto.ReadResp{Found: false}, nil
+		return proto.FileStat{Rel: rel}, nil // Exists=false
 	}
-	return proto.ReadResp{Found: true, Content: f.content, Hash: hashx.Bytes(f.content),
-		ModTime: f.mod, Mode: f.mode}, nil
+	st := proto.FileStat{Rel: rel, Exists: true, Size: int64(len(f.content)),
+		ModTime: f.mod, Mode: f.mode}
+	s.mu.Lock()
+	gate := s.readGate
+	s.mu.Unlock()
+	if gate != nil && len(f.content) > 1 {
+		half := len(f.content) / 2
+		if err := sink(f.content[:half]); err != nil {
+			return proto.FileStat{}, err
+		}
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return proto.FileStat{}, ctx.Err()
+		}
+		if err := sink(f.content[half:]); err != nil {
+			return proto.FileStat{}, err
+		}
+		return st, nil
+	}
+	if err := sink(f.content); err != nil {
+		return proto.FileStat{}, err
+	}
+	return st, nil
 }
 
 func (s *fakeSource) Write(_ context.Context, req proto.WriteReq) (proto.WriteAck, error) {
@@ -774,5 +801,128 @@ func TestDeleteJournalsAndRemoves(t *testing.T) {
 	}
 	if _, ok := src.get("del.txt"); ok {
 		t.Fatal("source file should be deleted after flush")
+	}
+}
+
+// A read-only open must serve bytes while the download is still running (the
+// progressive-read path), and the finished file must land in the cache with
+// index metadata — while the reader's fd keeps working across the rename.
+func TestProgressiveReadStreamsDuringFetch(t *testing.T) {
+	b, src := harness(t)
+	src.put("big.txt", "hello world!") // gate splits this into "hello " + "world!"
+	gate := make(chan struct{})
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+
+	ctx := context.Background()
+	f, st, err := b.OpenForRead(ctx, "big.txt")
+	if err != nil || st == nil {
+		t.Fatalf("OpenForRead: st=%v err=%v", st, err)
+	}
+	defer f.Close()
+
+	// The first half must become readable while the second is still blocked.
+	if err := st.wait(ctx, 6); err != nil {
+		t.Fatalf("wait(6): %v", err)
+	}
+	buf := make([]byte, 6)
+	if _, err := f.ReadAt(buf, 0); err != nil || string(buf) != "hello " {
+		t.Fatalf("early read=%q err=%v", buf, err)
+	}
+	if cacheFileExists(b.cachePath("big.txt")) {
+		t.Fatal("final cache file must not exist while the fetch is in flight")
+	}
+
+	close(gate)
+	if err := st.wait(ctx, -1); err != nil {
+		t.Fatalf("wait(done): %v", err)
+	}
+	got, err := os.ReadFile(b.cachePath("big.txt"))
+	if err != nil || string(got) != "hello world!" {
+		t.Fatalf("final cache=%q err=%v", got, err)
+	}
+	// The open fd survived the staging->final rename (same inode).
+	if _, err := f.ReadAt(buf, 6); err != nil || string(buf) != "world!" {
+		t.Fatalf("tail read=%q err=%v", buf, err)
+	}
+	e, ok := b.index.Get("big.txt")
+	if !ok || !e.HaveContent || e.Hash != hashx.Bytes([]byte("hello world!")) {
+		t.Fatalf("index entry=%+v ok=%v", e, ok)
+	}
+	if _, err := os.Stat(b.cachePath("big.txt") + fetchTmpSuffix); !os.IsNotExist(err) {
+		t.Fatal("staging file must be gone after completion")
+	}
+}
+
+// Stop (unmount) must abort an in-flight fetch promptly — a blocked download
+// used to keep the FUSE op outstanding and hang `lg unmount` for minutes.
+func TestStopAbortsInflightFetch(t *testing.T) {
+	b, src := harness(t)
+	src.put("slow.txt", "0123456789")
+	gate := make(chan struct{}) // never closed: the fetch stays stuck
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Materialize(context.Background(), "slow.txt")
+		done <- err
+	}()
+	for i := 0; i < 200 && !b.fetchActive("slow.txt"); i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !b.fetchActive("slow.txt") {
+		t.Fatal("fetch never started")
+	}
+
+	b.Stop()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Materialize must fail when the backend stops mid-fetch")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Materialize still blocked after Stop — unmount would hang")
+	}
+	if _, err := os.Stat(b.cachePath("slow.txt") + fetchTmpSuffix); !os.IsNotExist(err) {
+		t.Fatal("aborted fetch must remove its staging file")
+	}
+}
+
+// Content idle past cache.evict_after_idle_minutes is dropped even when the
+// total is under the size cap (the knob existed in config but did nothing —
+// the cache only ever grew until 10 GB).
+func TestEvictIdleContent(t *testing.T) {
+	b, src := harness(t)
+	src.put("old.txt", "stale content")
+	src.put("fresh.txt", "fresh content")
+	ctx := context.Background()
+	for _, rel := range []string{"old.txt", "fresh.txt"} {
+		if _, err := b.Materialize(ctx, rel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Age old.txt's access time past the 30-minute idle window.
+	past := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(b.cachePath("old.txt"), past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	b.EvictOnce()
+
+	if cacheFileExists(b.cachePath("old.txt")) {
+		t.Fatal("idle content must be evicted")
+	}
+	if e, ok := b.index.Get("old.txt"); !ok || e.HaveContent {
+		t.Fatalf("evicted entry must lose HaveContent: %+v", e)
+	}
+	if !cacheFileExists(b.cachePath("fresh.txt")) {
+		t.Fatal("recently-used content must survive the idle sweep")
+	}
+	// Still listed and refetchable: the metadata index is untouched.
+	if _, err := b.Materialize(ctx, "old.txt"); err != nil {
+		t.Fatalf("refetch after idle eviction: %v", err)
 	}
 }

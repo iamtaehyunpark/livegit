@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
@@ -42,32 +43,52 @@ func (b *Backend) RunEviction(ctx context.Context) {
 	}
 }
 
-// EvictOnce performs one size-cap sweep. Exposed for tests.
+// EvictOnce performs one eviction sweep: first drops content idle longer than
+// cache.evict_after_idle_minutes (so the cache doesn't grow without bound while
+// under the size cap — it used to), then enforces the size cap LRU-first.
+// Files with unflushed edits (their bytes are the only copy until the flush
+// worker pushes them) and in-flight downloads are never touched.
 func (b *Backend) EvictOnce() {
-	capBytes := b.capBytes()
-	if capBytes <= 0 {
-		return
-	}
 	files, total := b.scanCache()
-	if total <= capBytes {
+
+	evict := func(f cachedFile) bool {
+		if b.journal.HasPending(f.rel) || b.fetchActive(f.rel) {
+			return false
+		}
+		if err := os.Remove(b.cachePath(f.rel)); err != nil && !os.IsNotExist(err) {
+			return false
+		}
+		b.index.SetHaveContent(f.rel, false)
+		b.log.Debug("evicted cached content", "rel", f.rel, "bytes", f.size)
+		return true
+	}
+
+	if idleMin := b.cfg.Cache.EvictAfterIdleMinutes; idleMin > 0 {
+		cutoff := time.Now().Add(-time.Duration(idleMin) * time.Minute)
+		kept := files[:0]
+		for _, f := range files {
+			if f.atime.Before(cutoff) && evict(f) {
+				total -= f.size
+				continue
+			}
+			kept = append(kept, f)
+		}
+		files = kept
+	}
+
+	capBytes := b.capBytes()
+	if capBytes <= 0 || total <= capBytes {
 		return
 	}
-	// Evict least-recently-accessed content first, skipping files with unflushed
-	// edits (their bytes are the only copy until the flush worker pushes them).
+	// Least-recently-accessed first.
 	sort.Slice(files, func(i, j int) bool { return files[i].atime.Before(files[j].atime) })
 	for _, f := range files {
 		if total <= capBytes {
 			break
 		}
-		if b.journal.HasPending(f.rel) {
-			continue
+		if evict(f) {
+			total -= f.size
 		}
-		if err := os.Remove(b.cachePath(f.rel)); err != nil && !os.IsNotExist(err) {
-			continue
-		}
-		b.index.SetHaveContent(f.rel, false)
-		total -= f.size
-		b.log.Debug("evicted cached content", "rel", f.rel, "bytes", f.size)
 	}
 }
 
@@ -80,6 +101,9 @@ func (b *Backend) scanCache() ([]cachedFile, int64) {
 		if err != nil || d.IsDir() {
 			return nil
 		}
+		if strings.HasSuffix(p, fetchTmpSuffix) {
+			return nil // in-flight download staging; not evictable content
+		}
 		info, ierr := d.Info()
 		if ierr != nil {
 			return nil
@@ -89,9 +113,12 @@ func (b *Backend) scanCache() ([]cachedFile, int64) {
 			return nil
 		}
 		files = append(files, cachedFile{
-			rel:   config.Rel(filepath.ToSlash(relPath)),
-			size:  info.Size(),
-			atime: info.ModTime(),
+			rel:  config.Rel(filepath.ToSlash(relPath)),
+			size: info.Size(),
+			// Real access time, not ModTime: the cache file's mtime is set to
+			// the SOURCE file's mtime (for Getattr), so using it here made
+			// "LRU" mean "oldest remote file" and idle eviction impossible.
+			atime: atimeOf(info),
 		})
 		total += info.Size()
 		return nil

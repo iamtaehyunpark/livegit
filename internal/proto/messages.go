@@ -99,8 +99,6 @@ type ReadResp struct {
 	Content []byte // this chunk's bytes
 	More    bool   // true when more bytes follow after this chunk
 	Size    int64  // total file size (Ghost detects mid-fetch changes with it)
-	Hash    string // whole-file hash, filled by the GHOST after reassembly —
-	// the agent never hashes on read (that would re-read the entire file)
 	ModTime int64
 	Mode    uint32
 }

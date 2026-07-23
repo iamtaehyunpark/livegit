@@ -110,26 +110,40 @@ func (n *lgNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (n *lgNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	cp, err := n.b.Materialize(ctx, n.rel)
+	osFlags := int(flags) &^ syscall.O_CREAT
+	writable := osFlags&(os.O_WRONLY|os.O_RDWR) != 0
+	if writable {
+		// Editing needs the complete file — wait for the full materialize.
+		cp, err := n.b.Materialize(ctx, n.rel)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, 0, syscall.ENOENT
+			}
+			return nil, 0, syscall.EIO
+		}
+		f, err := os.OpenFile(cp, osFlags, 0o644)
+		if err != nil {
+			return nil, 0, fs.ToErrno(err)
+		}
+		h := &lgHandle{f: f, b: n.b, rel: n.rel, writable: true}
+		// O_TRUNC changes the file at open time (`> file`), so a rewrite that
+		// writes zero bytes and closes still needs journaling — dirty up front.
+		if osFlags&os.O_TRUNC != 0 {
+			h.dirty = true
+		}
+		return h, 0, 0
+	}
+	// Read-only: serve bytes progressively while the download runs, so a big
+	// file streams at link speed with visible progress instead of freezing the
+	// opener until the last byte lands.
+	f, st, err := n.b.OpenForRead(ctx, n.rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, syscall.ENOENT
 		}
 		return nil, 0, syscall.EIO
 	}
-	osFlags := int(flags) &^ syscall.O_CREAT
-	f, err := os.OpenFile(cp, osFlags, 0o644)
-	if err != nil {
-		return nil, 0, fs.ToErrno(err)
-	}
-	writable := osFlags&(os.O_WRONLY|os.O_RDWR) != 0
-	h := &lgHandle{f: f, b: n.b, rel: n.rel, writable: writable}
-	// O_TRUNC changes the file at open time (`> file`), so a rewrite that writes
-	// zero bytes and closes still needs to be journaled — mark it dirty up front.
-	if writable && osFlags&os.O_TRUNC != 0 {
-		h.dirty = true
-	}
-	return h, 0, 0
+	return &lgHandle{f: f, b: n.b, rel: n.rel, fetch: st}, 0, 0
 }
 
 func (n *lgNode) Create(ctx context.Context, name string, flags, mode uint32, out *gofuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
@@ -281,6 +295,7 @@ type lgHandle struct {
 	b        *Backend
 	rel      string
 	writable bool
+	fetch    *fetchState // non-nil on a read handle over an in-flight download
 
 	mu    sync.Mutex
 	dirty bool
@@ -295,6 +310,17 @@ var (
 )
 
 func (h *lgHandle) Read(ctx context.Context, dest []byte, off int64) (gofuse.ReadResult, syscall.Errno) {
+	if h.fetch != nil {
+		// Wait until the download has covered this range (or finished — a
+		// short read at EOF is then handled normally below). ctx is the kernel
+		// request context: an interrupted reader unblocks immediately.
+		if err := h.fetch.wait(ctx, off+int64(len(dest))); err != nil {
+			if ctx.Err() != nil {
+				return nil, syscall.EINTR
+			}
+			return nil, syscall.EIO
+		}
+	}
 	return gofuse.ReadResultFd(uintptr(h.f.Fd()), off, len(dest)), 0
 }
 

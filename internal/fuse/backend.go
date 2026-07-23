@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -19,7 +20,9 @@ import (
 // the backend is unit-testable against a fake Source.
 type SourceRPC interface {
 	Stat(ctx context.Context, rel string) (proto.FileStat, error)
-	Read(ctx context.Context, rel string) (proto.ReadResp, error)
+	// ReadStream streams rel's content in order through sink and returns the
+	// file's metadata (Exists=false with nil error when absent on Source).
+	ReadStream(ctx context.Context, rel string, sink func(chunk []byte) error) (proto.FileStat, error)
 	Write(ctx context.Context, req proto.WriteReq) (proto.WriteAck, error)
 	Delete(ctx context.Context, req proto.DelReq) (proto.DelAck, error)
 	// Tree fetches the full snapshot. haveDigest is the digest of the tree the
@@ -48,6 +51,11 @@ type Backend struct {
 	// session — never synced to Source. See xattr.go for why this exists.
 	xattrs xattrStore
 
+	// fetches tracks in-flight content downloads so concurrent opens share one
+	// transfer and eviction skips files still being written (see fetch.go).
+	fetchMu sync.Mutex
+	fetches map[string]*fetchState
+
 	// treeDigest identifies the last tree snapshot applied by SyncTree, echoed
 	// to Source so an unchanged tree costs no transfer. Only the RunTreeSync
 	// goroutine touches it.
@@ -73,6 +81,7 @@ func (b *Backend) capBytes() int64 {
 // NewBackend assembles the Ghost FUSE backend.
 func NewBackend(cfg *config.Config, journal *Journal, source SourceRPC, matcher *config.Matcher) *Backend {
 	return &Backend{
+		fetches:  map[string]*fetchState{},
 		index:    NewIndex(filepath.Join(config.Dir(), "tree.json")),
 		journal:  journal,
 		cacheDir: config.CacheDir(),
@@ -236,56 +245,26 @@ func (b *Backend) RunTreeSync(ctx context.Context) {
 	}
 }
 
-// Materialize ensures rel has real local content, fetching from Source on demand
-// (the open() hook). Returns the local cache path. Offline with no cached copy
-// surfaces as an error so the OS reports "can't read, no connection".
+// Materialize ensures rel has COMPLETE local content, fetching from Source on
+// demand, and returns the local cache path. This is the full-wait form used by
+// writable opens (editing needs the whole file) and internal callers (rename,
+// truncate); read-only opens go through OpenForRead instead and stream. Offline
+// with no cached copy surfaces as an error so the OS reports "can't read, no
+// connection". The fetch itself streams to disk in chunks (fetch.go) — no
+// whole-file buffer, shared with any concurrent readers.
 func (b *Backend) Materialize(ctx context.Context, rel string) (string, error) {
 	rel = config.Rel(rel)
-	cp := b.cachePath(rel)
-	if cacheFileExists(cp) {
-		return cp, nil
-	}
-	if !b.source.Online() {
-		return "", fmt.Errorf("offline: cannot fetch %s", rel)
-	}
-	resp, err := b.source.Read(ctx, rel)
+	path, st, err := b.StartFetch(ctx, rel)
 	if err != nil {
 		return "", err
 	}
-	if !resp.Found {
-		return "", os.ErrNotExist
+	if st == nil {
+		return path, nil // already cached
 	}
-	if err := os.MkdirAll(filepath.Dir(cp), 0o755); err != nil {
+	if err := st.wait(ctx, -1); err != nil {
 		return "", err
 	}
-	mode := os.FileMode(resp.Mode)
-	if mode == 0 {
-		mode = 0o644
-	}
-	// Write via temp + rename: a crash or full disk mid-write must never leave a
-	// truncated file at cp — cacheFileExists would treat it as fully materialized
-	// and serve the partial bytes as the real content forever after.
-	tmp := cp + ".lg-tmp"
-	if err := os.WriteFile(tmp, resp.Content, mode); err != nil {
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	// Preserve Source's mtime on the cache file so Getattr (which reads the
-	// cache file's mtime) returns the correct remote timestamp, not "now".
-	if resp.ModTime > 0 {
-		t := time.Unix(resp.ModTime, 0)
-		_ = os.Chtimes(tmp, t, t)
-	}
-	if err := os.Rename(tmp, cp); err != nil {
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	b.index.Put(&Entry{
-		Rel: rel, Size: int64(len(resp.Content)), ModTime: resp.ModTime,
-		Mode: resp.Mode, Hash: resp.Hash, HaveContent: true,
-	})
-	b.log.Debug("materialized", "rel", rel, "bytes", len(resp.Content))
-	return cp, nil
+	return b.cachePath(rel), nil
 }
 
 // ignored reports whether rel should never sync up to Source: the ignore matcher

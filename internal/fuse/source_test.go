@@ -34,9 +34,9 @@ func fsCaller(t *testing.T, fs *agent.FileServer) fileCaller {
 	}
 }
 
-// A file bigger than the chunk size round-trips through readFull in multiple
-// chunks, byte-identical, with the whole-file hash computed ghost-side.
-func TestReadFullChunksRoundTrip(t *testing.T) {
+// A file bigger than the chunk size streams through readStream in multiple
+// ordered chunks, byte-identical, with correct metadata.
+func TestReadStreamChunksRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	content := bytes.Repeat([]byte("0123456789abcdef"), 64) // 1 KiB
 	if err := os.WriteFile(filepath.Join(root, "big.bin"), content, 0o644); err != nil {
@@ -44,20 +44,29 @@ func TestReadFullChunksRoundTrip(t *testing.T) {
 	}
 	call := fsCaller(t, agent.NewFileServer(root, nil))
 
-	resp, err := readFull(context.Background(), call, "big.bin", 100) // force ~11 chunks
-	if err != nil || !resp.Found {
-		t.Fatalf("resp=%+v err=%v", resp, err)
+	var got []byte
+	chunks := 0
+	st, err := readStream(context.Background(), call, "big.bin", 100, func(c []byte) error {
+		chunks++
+		got = append(got, c...)
+		return nil
+	})
+	if err != nil || !st.Exists {
+		t.Fatalf("st=%+v err=%v", st, err)
 	}
-	if !bytes.Equal(resp.Content, content) {
-		t.Fatalf("content mismatch: got %d bytes want %d", len(resp.Content), len(content))
+	if !bytes.Equal(got, content) || chunks < 2 {
+		t.Fatalf("got %d bytes in %d chunks, want %d bytes in >1 chunks", len(got), chunks, len(content))
 	}
-	if resp.Hash != hashx.Bytes(content) {
-		t.Fatalf("hash=%q want %q", resp.Hash, hashx.Bytes(content))
+	if st.Size != int64(len(content)) {
+		t.Fatalf("size=%d want %d", st.Size, len(content))
 	}
 
-	missing, err := readFull(context.Background(), call, "nope.bin", 100)
-	if err != nil || missing.Found {
-		t.Fatalf("missing file: resp=%+v err=%v", missing, err)
+	missing, err := readStream(context.Background(), call, "nope.bin", 100, func([]byte) error {
+		t.Fatal("sink must not run for a missing file")
+		return nil
+	})
+	if err != nil || missing.Exists {
+		t.Fatalf("missing file: st=%+v err=%v", missing, err)
 	}
 }
 

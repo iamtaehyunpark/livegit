@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/iamtaehyunpark/livegit/internal/hashx"
 	"github.com/iamtaehyunpark/livegit/internal/proto"
 	"github.com/iamtaehyunpark/livegit/internal/transport"
 )
@@ -40,8 +39,8 @@ func (s *clientSource) Stat(ctx context.Context, rel string) (proto.FileStat, er
 	return resp.Stat, nil
 }
 
-func (s *clientSource) Read(ctx context.Context, rel string) (proto.ReadResp, error) {
-	return readFull(ctx, s.c.FileCall, rel, 0)
+func (s *clientSource) ReadStream(ctx context.Context, rel string, sink func([]byte) error) (proto.FileStat, error) {
+	return readStream(ctx, s.c.FileCall, rel, 0, sink)
 }
 
 func (s *clientSource) Write(ctx context.Context, req proto.WriteReq) (proto.WriteAck, error) {
@@ -62,59 +61,67 @@ func (s *clientSource) Tree(ctx context.Context, have string) ([]proto.TreeEntry
 	return fetchTree(ctx, s.c.FileCall, have)
 }
 
-// readFull fetches a whole file as a sequence of bounded chunks (maxLen 0 =
-// agent default). One giant frame for a 200MB+ file used to blow the codec's
-// 256MiB cap after base64 and kill the whole connection; chunking also bounds
-// agent memory. If the file changes on Source mid-fetch (size/mtime moved
-// between chunks) the loop restarts so a torn copy is never returned.
-func readFull(ctx context.Context, call fileCaller, rel string, maxLen int64) (proto.ReadResp, error) {
-	for attempt := 0; attempt < 3; attempt++ {
-		out, restart, err := readOnce(ctx, call, rel, maxLen)
-		if err != nil {
-			return proto.ReadResp{}, err
-		}
-		if !restart {
-			if out.Found {
-				// Whole-file hash computed here, once, from the assembled bytes
-				// — the agent never re-reads a file just to hash it.
-				out.Hash = hashx.Bytes(out.Content)
-			}
-			return out, nil
-		}
+// readStream fetches a file as a sequence of bounded chunks (maxLen 0 = agent
+// default), delivering each to sink in order and returning the file metadata.
+// One giant frame for a 200MB+ file used to blow the codec's 256MiB cap after
+// base64 and kill the whole connection; chunking also bounds memory on both
+// sides. The next chunk is requested BEFORE sink processes the current one
+// (depth-1 prefetch), overlapping network transfer with disk writes. A file
+// that changes on Source mid-fetch fails the read — readers may already have
+// consumed early bytes, so a silent restart could hand out a torn mix.
+func readStream(ctx context.Context, call fileCaller, rel string, maxLen int64, sink func([]byte) error) (proto.FileStat, error) {
+	type result struct {
+		chunk proto.ReadResp
+		err   error
 	}
-	return proto.ReadResp{}, fmt.Errorf("%s keeps changing on source during fetch", rel)
-}
-
-func readOnce(ctx context.Context, call fileCaller, rel string, maxLen int64) (out proto.ReadResp, restart bool, err error) {
-	var off int64
-	for {
+	fetch := func(off int64, out chan<- result) {
 		f, err := call(ctx, proto.TypeReadReq, proto.ReadReq{Rel: rel, Offset: off, MaxLen: maxLen})
 		if err != nil {
-			return proto.ReadResp{}, false, err
+			out <- result{err: err}
+			return
 		}
 		var chunk proto.ReadResp
-		if err := proto.Unmarshal(f.Body, &chunk); err != nil {
-			return proto.ReadResp{}, false, err
+		err = proto.Unmarshal(f.Body, &chunk)
+		out <- result{chunk: chunk, err: err}
+	}
+
+	var st proto.FileStat
+	var off int64
+	next := make(chan result, 1)
+	go fetch(0, next)
+	for first := true; ; first = false {
+		r := <-next
+		if r.err != nil {
+			return proto.FileStat{}, r.err
 		}
+		chunk := r.chunk
 		if !chunk.Found {
-			return chunk, false, nil
-		}
-		if off == 0 {
-			out = chunk
-			out.Content = append(make([]byte, 0, chunk.Size), chunk.Content...)
-		} else {
-			if chunk.Size != out.Size || chunk.ModTime != out.ModTime {
-				return proto.ReadResp{}, true, nil // file changed under us; refetch
+			if first {
+				return proto.FileStat{Rel: rel}, nil // Exists=false
 			}
-			out.Content = append(out.Content, chunk.Content...)
+			return proto.FileStat{}, fmt.Errorf("%s vanished on source during fetch", rel)
+		}
+		if first {
+			st = proto.FileStat{Rel: rel, Exists: true, Size: chunk.Size,
+				ModTime: chunk.ModTime, Mode: chunk.Mode}
+		} else if chunk.Size != st.Size || chunk.ModTime != st.ModTime {
+			return proto.FileStat{}, fmt.Errorf("%s changed on source during fetch", rel)
+		}
+		if chunk.More {
+			if len(chunk.Content) == 0 {
+				return proto.FileStat{}, fmt.Errorf("empty non-final read chunk for %s at offset %d", rel, off)
+			}
+			go fetch(off+int64(len(chunk.Content)), next) // prefetch while sink runs
+		}
+		if err := sink(chunk.Content); err != nil {
+			if chunk.More {
+				<-next // drain the prefetch so its goroutine can exit
+			}
+			return proto.FileStat{}, err
 		}
 		off += int64(len(chunk.Content))
 		if !chunk.More {
-			out.More = false
-			return out, false, nil
-		}
-		if len(chunk.Content) == 0 {
-			return proto.ReadResp{}, false, fmt.Errorf("empty non-final read chunk for %s at offset %d", rel, off)
+			return st, nil
 		}
 	}
 }

@@ -411,13 +411,16 @@ lg unmount; ssh galaxy-04 'pkill -f "lg serve"'`.
 - A `make deploy-source` one-step redeploy of the Linux binary to Source.
 - A `lg doctor` that checks config + ssh reachability + remote agent + remote_root
   + macFUSE + stale mounts in one non-interactive command (great for agent tests).
-- ~~Full-tree sync ships one whole `TreeResp` snapshot~~ Fixed: tree sync is now
-  paged + gzipped + digest-gated (unchanged tree = no transfer), the walk is
-  parallel, and file content moves in 4 MiB chunks both ways (a whole-file frame
-  for a 200 MB+ file used to exceed the 256 MiB cap after base64 and kill the
-  connection — found live on sclab 2026-07-22). Big-file reads still fetch the
-  WHOLE file on open (materialize is all-or-nothing); range-lazy reads are the
-  remaining gap if that ever hurts.
+- ~~Full-tree sync ships one whole `TreeResp` snapshot~~ Fixed (v1.4.0): tree
+  sync is paged + gzipped + digest-gated (unchanged tree = no transfer), the
+  walk is parallel, and file content moves in 4 MiB chunks both ways (a
+  whole-file frame for a 200 MB+ file used to exceed the 256 MiB cap after
+  base64 and kill the connection — found live on sclab 2026-07-22). Since
+  v1.4.1, read-only opens are **progressive**: bytes stream to the reader while
+  the download runs (fetch.go fetchState; writable opens still wait for the
+  full file), `lg unmount` aborts in-flight fetches instead of hanging behind
+  them, and `cache.evict_after_idle_minutes` actually works (it was a dead
+  knob; eviction now also uses real atime for LRU instead of the Source mtime).
 - `.git` is still synced into the mount (only `ignore` patterns are skipped). Add
   `.git/` to config `ignore` if you want it out — git ops should run via `lg <cmd>`.
 - `lg toggle` uses the zsh/bash preexec hook; the bash DEBUG-trap path is
