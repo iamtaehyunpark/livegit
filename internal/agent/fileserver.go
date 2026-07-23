@@ -177,13 +177,37 @@ func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
 
 	// Chunked upload (big files arrive in ChunkSize pieces): accumulate into a
 	// sidecar staging file; only the final chunk falls through to commit below,
-	// so a half-uploaded file is never visible at the real path.
-	staged := req.Offset > 0 || req.More
+	// so a half-uploaded file is never visible at the real path. An `.id` file
+	// records the upload identity so an interrupted upload can RESUME: the
+	// Ghost probes for the staged size and continues from there instead of
+	// re-sending everything (a dropped link at minute 4 of a 900MB push used
+	// to mean starting over).
 	part := abs + ".lg-part"
+	idf := part + ".id"
+	if req.Probe {
+		var at int64
+		if id, err := os.ReadFile(idf); err == nil && req.StageID != "" && string(id) == req.StageID {
+			if st, err := os.Stat(part); err == nil {
+				at = st.Size()
+			}
+		}
+		return proto.WriteAck{OK: true, StagedAt: at}, nil
+	}
+	staged := req.Offset > 0 || req.More
 	if staged {
 		flags := os.O_WRONLY | os.O_CREATE | os.O_APPEND
 		if req.Offset == 0 {
 			flags |= os.O_TRUNC // fresh upload; also clears any abandoned staging
+			if err := os.WriteFile(idf, []byte(req.StageID), 0o600); err != nil {
+				return proto.WriteAck{}, err
+			}
+		} else {
+			if id, err := os.ReadFile(idf); err != nil || string(id) != req.StageID {
+				// Different upload than the staged one: restart from scratch.
+				os.Remove(part)
+				os.Remove(idf)
+				return proto.WriteAck{}, fmt.Errorf("stale staging for %s; restart upload", req.Rel)
+			}
 		}
 		f, err := os.OpenFile(part, flags, 0o600)
 		if err != nil {
@@ -191,24 +215,22 @@ func (fs *FileServer) write(req proto.WriteReq) (proto.WriteAck, error) {
 		}
 		st, err := f.Stat()
 		if err == nil && st.Size() != req.Offset {
-			// A gap means a lost/replayed chunk; fail the whole write so the
-			// Ghost's flush retry restarts it from offset 0.
+			// A gap means a lost/replayed chunk. Keep the staging — the Ghost's
+			// retry probes StagedAt and realigns instead of re-uploading.
 			f.Close()
-			os.Remove(part)
 			return proto.WriteAck{}, fmt.Errorf("write chunk gap for %s: staged %d bytes, chunk offset %d", req.Rel, st.Size(), req.Offset)
 		}
 		if _, err := f.Write(req.Content); err != nil {
 			f.Close()
-			os.Remove(part)
 			return proto.WriteAck{}, err
 		}
 		if err := f.Close(); err != nil {
-			os.Remove(part)
 			return proto.WriteAck{}, err
 		}
 		if req.More {
 			return proto.WriteAck{OK: true}, nil
 		}
+		defer os.Remove(idf) // commit (or its failure) ends this staged upload
 	}
 	ack := proto.WriteAck{}
 
@@ -510,6 +532,9 @@ func (fs *FileServer) walkTree() []proto.TreeEntry {
 		}
 		local := make([]proto.TreeEntry, 0, len(ents))
 		for _, d := range ents {
+			if n := d.Name(); strings.HasSuffix(n, ".lg-part") || strings.HasSuffix(n, ".lg-part.id") {
+				continue // transient upload staging; never part of the tree
+			}
 			abs := filepath.Join(dir, d.Name())
 			rel, rerr := fs.mapper.RemoteToRel(abs)
 			if rerr != nil || rel == "" || rel == "." {

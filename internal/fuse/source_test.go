@@ -70,17 +70,47 @@ func TestReadStreamChunksRoundTrip(t *testing.T) {
 	}
 }
 
-// writeChunked splits content into chunks and the agent commits them as one
-// atomic file.
-func TestWriteChunkedRoundTrip(t *testing.T) {
+// writeFile streams a local file in chunks and the agent commits them as one
+// atomic file; an upload cut mid-way RESUMES from the staged prefix on retry
+// instead of re-sending from byte zero.
+func TestWriteFileResumesAfterInterrupt(t *testing.T) {
 	root := t.TempDir()
-	call := fsCaller(t, agent.NewFileServer(root, nil))
+	realCall := fsCaller(t, agent.NewFileServer(root, nil))
 	content := bytes.Repeat([]byte("wxyz"), 300) // 1200 bytes, chunkSize 500 -> 3 chunks
+	local := filepath.Join(t.TempDir(), "up.bin")
+	if err := os.WriteFile(local, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	ack, err := writeChunked(context.Background(), call,
-		proto.WriteReq{Rel: "up.bin", Content: content, Mode: 0o644, ModTime: 1700000000}, 500)
+	// Flaky transport: drop the SECOND content chunk of the first attempt.
+	var contentChunks, zeroStarts int
+	failAt := 2
+	flaky := func(ctx context.Context, typ proto.MsgType, body any) (proto.Frame, error) {
+		if w, ok := body.(proto.WriteReq); ok && typ == proto.TypeWriteReq && !w.Probe {
+			contentChunks++
+			if w.Offset == 0 {
+				zeroStarts++
+			}
+			if contentChunks == failAt {
+				contentChunks = -1000 // fail only once
+				return proto.Frame{}, context.DeadlineExceeded
+			}
+		}
+		return realCall(ctx, typ, body)
+	}
+
+	req := proto.WriteReq{Rel: "up.bin", Mode: 0o644, ModTime: 1700000000}
+	if _, err := writeFile(context.Background(), flaky, req, local, 500); err == nil {
+		t.Fatal("first attempt should fail at chunk 2")
+	}
+	// Retry (what the flush worker does): must probe, resume at 500, and NOT
+	// send another offset-0 chunk.
+	ack, err := writeFile(context.Background(), flaky, req, local, 500)
 	if err != nil || !ack.OK {
-		t.Fatalf("ack=%+v err=%v", ack, err)
+		t.Fatalf("retry ack=%+v err=%v", ack, err)
+	}
+	if zeroStarts != 1 {
+		t.Fatalf("offset-0 chunks sent=%d, want 1 (retry must resume, not restart)", zeroStarts)
 	}
 	got, err := os.ReadFile(filepath.Join(root, "up.bin"))
 	if err != nil || !bytes.Equal(got, content) {
@@ -88,6 +118,9 @@ func TestWriteChunkedRoundTrip(t *testing.T) {
 	}
 	if ack.NewHash != hashx.Bytes(content) {
 		t.Fatalf("NewHash=%q want %q", ack.NewHash, hashx.Bytes(content))
+	}
+	if _, err := os.Stat(filepath.Join(root, "up.bin.lg-part.id")); !os.IsNotExist(err) {
+		t.Fatal("stage id file must be gone after commit")
 	}
 }
 

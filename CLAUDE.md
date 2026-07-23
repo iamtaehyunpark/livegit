@@ -156,6 +156,11 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
 - `lg unmount` — stop the mount (idempotent: "nothing mounted" is success; also
   clears a leftover/stale mount).
 - `lg status` — connection, toggle on/off, tree-sync freshness, cache, pending writes.
+- `lg flush` — push pending journal writes to Source now and wait until they
+  land (`--timeout` to bound the wait). With a live mount it watches the
+  mount's flush worker drain; with no mount it connects and drains the journal
+  itself (otherwise pending writes sit until the next `lg mount`). Uploads are
+  chunked, streamed from disk, and resumable across dropped connections.
 - `lg serve --remote-root <p> [--ignore <csv>]` — Source agent (hidden; launched over ssh).
 
 ## Detached jobs (fire-and-forget remote runs)

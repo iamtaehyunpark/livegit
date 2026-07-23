@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"time"
 
@@ -88,7 +89,8 @@ func (b *Backend) flushEntry(ctx context.Context, e JournalEntry) error {
 		return b.journal.Ack(e.Seq)
 
 	default: // write / create
-		content, err := os.ReadFile(b.cachePath(e.Rel))
+		cp := b.cachePath(e.Rel)
+		st, err := os.Stat(cp)
 		if err != nil {
 			if os.IsNotExist(err) {
 				// File vanished before flush (e.g. deleted); drop entry.
@@ -96,13 +98,13 @@ func (b *Backend) flushEntry(ctx context.Context, e JournalEntry) error {
 			}
 			return err
 		}
-		ack, err := b.source.Write(ctx, proto.WriteReq{
+		// Streamed from disk in chunks (resumable) — never a whole-file buffer.
+		ack, err := b.source.WriteFile(ctx, proto.WriteReq{
 			Rel:      e.Rel,
-			Content:  content,
 			BaseHash: e.BaseHash, // empty: last-write-wins, Source overwrites
 			ModTime:  e.ModTime,
 			Mode:     e.Mode,
-		})
+		}, cp)
 		if err != nil {
 			return err
 		}
@@ -110,11 +112,29 @@ func (b *Backend) flushEntry(ctx context.Context, e JournalEntry) error {
 		// content doesn't needlessly drop our cache.
 		if ack.NewHash != "" {
 			b.index.Put(&Entry{
-				Rel: e.Rel, Size: int64(len(content)), ModTime: e.ModTime,
+				Rel: e.Rel, Size: st.Size(), ModTime: e.ModTime,
 				Mode: e.Mode, Hash: ack.NewHash, HaveContent: true,
 			})
 		}
 		return b.journal.Ack(e.Seq)
+	}
+}
+
+// FlushAll drains the journal synchronously, reporting each entry as it goes.
+// This is `lg flush` when no mount is up — without a mount there is no flush
+// worker, so pending writes would otherwise sit until the next `lg mount`.
+func (b *Backend) FlushAll(ctx context.Context, progress func(left int, rel string)) error {
+	for {
+		e, ok := b.journal.Peek()
+		if !ok {
+			return nil
+		}
+		if progress != nil {
+			progress(b.journal.PendingCount(), e.Rel)
+		}
+		if err := b.flushEntry(ctx, e); err != nil {
+			return fmt.Errorf("flushing %s: %w", e.Rel, err)
+		}
 	}
 }
 

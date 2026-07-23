@@ -118,6 +118,15 @@ func (s *fakeSource) Write(_ context.Context, req proto.WriteReq) (proto.WriteAc
 	return proto.WriteAck{OK: true, NewHash: hashx.Bytes(req.Content), SourceMod: req.ModTime}, nil
 }
 
+func (s *fakeSource) WriteFile(ctx context.Context, req proto.WriteReq, localPath string) (proto.WriteAck, error) {
+	b, err := os.ReadFile(localPath)
+	if err != nil {
+		return proto.WriteAck{}, err
+	}
+	req.Content = b
+	return s.Write(ctx, req)
+}
+
 func (s *fakeSource) Rename(_ context.Context, req proto.RenameReq) (proto.RenameAck, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

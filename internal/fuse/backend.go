@@ -23,7 +23,12 @@ type SourceRPC interface {
 	// ReadStream streams rel's content in order through sink and returns the
 	// file's metadata (Exists=false with nil error when absent on Source).
 	ReadStream(ctx context.Context, rel string, sink func(chunk []byte) error) (proto.FileStat, error)
+	// Write applies a single-frame write (mkdir, or content that fits one
+	// chunk). File flushes go through WriteFile, which streams from disk.
 	Write(ctx context.Context, req proto.WriteReq) (proto.WriteAck, error)
+	// WriteFile pushes the file at localPath to req.Rel, chunked + resumable;
+	// req.Content is ignored.
+	WriteFile(ctx context.Context, req proto.WriteReq, localPath string) (proto.WriteAck, error)
 	Delete(ctx context.Context, req proto.DelReq) (proto.DelAck, error)
 	Rename(ctx context.Context, req proto.RenameReq) (proto.RenameAck, error)
 	// Tree fetches the full snapshot. haveDigest is the digest of the tree the

@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/iamtaehyunpark/livegit/internal/proto"
 	"github.com/iamtaehyunpark/livegit/internal/transport"
@@ -44,7 +46,11 @@ func (s *clientSource) ReadStream(ctx context.Context, rel string, sink func([]b
 }
 
 func (s *clientSource) Write(ctx context.Context, req proto.WriteReq) (proto.WriteAck, error) {
-	return writeChunked(ctx, s.c.FileCall, req, proto.ChunkSize)
+	return writeCall(ctx, s.c.FileCall, req)
+}
+
+func (s *clientSource) WriteFile(ctx context.Context, req proto.WriteReq, localPath string) (proto.WriteAck, error) {
+	return writeFile(ctx, s.c.FileCall, req, localPath, proto.ChunkSize)
 }
 
 func (s *clientSource) Rename(ctx context.Context, req proto.RenameReq) (proto.RenameAck, error) {
@@ -136,34 +142,70 @@ func readStream(ctx context.Context, call fileCaller, rel string, maxLen int64, 
 	}
 }
 
-// writeChunked uploads req.Content in bounded pieces; the final (!More) chunk
-// makes the agent commit atomically (conflict check + rename into place).
-// Small writes and mkdirs stay a single frame, exactly as before.
-func writeChunked(ctx context.Context, call fileCaller, req proto.WriteReq, chunkSize int) (proto.WriteAck, error) {
-	writeCall := func(r proto.WriteReq) (proto.WriteAck, error) {
-		f, err := call(ctx, proto.TypeWriteReq, r)
-		if err != nil {
+func writeCall(ctx context.Context, call fileCaller, req proto.WriteReq) (proto.WriteAck, error) {
+	f, err := call(ctx, proto.TypeWriteReq, req)
+	if err != nil {
+		return proto.WriteAck{}, err
+	}
+	var ack proto.WriteAck
+	err = proto.Unmarshal(f.Body, &ack)
+	return ack, err
+}
+
+// writeFile uploads the file at localPath in bounded chunks, streamed straight
+// from disk (no whole-file buffer — a 900MB flush used to spike that much RAM).
+// Multi-chunk uploads are RESUMABLE: a probe asks Source how much of this exact
+// upload (StageID = local size+mtime) is already staged from an interrupted
+// attempt, and the loop continues from there. The final (!More) chunk makes the
+// agent commit atomically (conflict check + rename into place).
+func writeFile(ctx context.Context, call fileCaller, req proto.WriteReq, localPath string, chunkSize int) (proto.WriteAck, error) {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return proto.WriteAck{}, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return proto.WriteAck{}, err
+	}
+	size := st.Size()
+
+	if size <= int64(chunkSize) {
+		buf := make([]byte, size)
+		if _, err := io.ReadFull(f, buf); err != nil {
 			return proto.WriteAck{}, err
 		}
-		var ack proto.WriteAck
-		err = proto.Unmarshal(f.Body, &ack)
-		return ack, err
+		req.Content = buf
+		return writeCall(ctx, call, req) // single frame; no staging, no probe
 	}
-	if req.IsDir || len(req.Content) <= chunkSize {
-		return writeCall(req) // zero Offset/More already mean "complete write"
+
+	req.StageID = fmt.Sprintf("%d-%d", size, st.ModTime().UnixNano())
+	probe := req
+	probe.Probe = true
+	ack, err := writeCall(ctx, call, probe)
+	if err != nil {
+		return proto.WriteAck{}, err
 	}
-	content := req.Content
-	for off := 0; ; {
-		end := min(off+chunkSize, len(content))
-		chunk := req // scalar fields (BaseHash/ModTime/Mode) ride on every chunk
-		chunk.Content = content[off:end]
-		chunk.Offset = int64(off)
-		chunk.More = end < len(content)
-		ack, err := writeCall(chunk)
+	off := ack.StagedAt
+	if off < 0 || off >= size {
+		off = 0
+	}
+
+	buf := make([]byte, chunkSize)
+	for {
+		n, rerr := f.ReadAt(buf, off)
+		if rerr != nil && rerr != io.EOF {
+			return proto.WriteAck{}, rerr
+		}
+		chunk := req // scalar fields (StageID/BaseHash/ModTime/Mode) ride on every chunk
+		chunk.Content = buf[:n]
+		chunk.Offset = off
+		chunk.More = off+int64(n) < size
+		ack, err := writeCall(ctx, call, chunk)
 		if err != nil || !chunk.More {
 			return ack, err
 		}
-		off = end
+		off += int64(n)
 	}
 }
 

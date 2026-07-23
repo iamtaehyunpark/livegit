@@ -57,6 +57,7 @@ func NewRoot() *cobra.Command {
 		newToggleCmd(),
 		newLocalCmd(),
 		newStatusCmd(),
+		newFlushCmd(),
 		newHookCmd(),
 		newAskpassCmd(),
 	)

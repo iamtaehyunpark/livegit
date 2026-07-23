@@ -114,6 +114,9 @@ type WriteReq struct {
 	Content  []byte // this chunk's bytes (the whole file when Offset=0, More=false)
 	Offset   int64  // where this chunk lands; big files upload in ChunkSize pieces
 	More     bool   // true = more chunks follow; the final (!More) chunk commits
+	Probe    bool   // resume query: reply with StagedAt for StageID, write nothing
+	StageID  string // upload identity (local size+mtime); a mid-upload change of
+	// the source bytes invalidates any staged prefix instead of mixing halves
 	BaseHash string
 	ModTime  int64
 	Mode     uint32
@@ -125,6 +128,7 @@ type WriteAck struct {
 	BackupRel string // path of the .lg-conflict backup, if any
 	NewHash   string // resulting content hash on Source
 	SourceMod int64  // Source's modtime after apply
+	StagedAt  int64  // Probe reply: staged bytes matching StageID (resume point)
 	Message   string
 }
 
