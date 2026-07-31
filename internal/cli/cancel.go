@@ -29,20 +29,25 @@ func newCancelCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			active := len(downloads())
 			if pid := mountPid(); pid > 0 && fuse.IsMounted(c.MountDir()) &&
 				syscall.Kill(pid, 0) == nil {
-				if err := syscall.Kill(pid, syscall.SIGUSR1); err == nil {
-					fmt.Println("told the mount to abort its downloads…")
+				if err := syscall.Kill(pid, syscall.SIGUSR1); err == nil && active > 0 {
 					// Canceled fetches remove their own staging within moments.
 					for i := 0; i < 30 && len(downloads()) > 0; i++ {
 						time.Sleep(100 * time.Millisecond)
 					}
 				}
 			}
-			n, freed := sweepStaging()
+			// Whatever staging remains is a leftover (crashed fetch, dead holder).
+			swept, freed := sweepStaging()
 			switch {
-			case n > 0:
-				fmt.Printf("✓ downloads stopped; removed %d staging file(s), freed %s\n", n, fmtMB(freed))
+			case active > 0 && swept > 0:
+				fmt.Printf("✓ canceled %d download(s); also removed %d stale staging file(s) (%s)\n", active, swept, fmtMB(freed))
+			case active > 0:
+				fmt.Printf("✓ canceled %d download(s)\n", active)
+			case swept > 0:
+				fmt.Printf("✓ no downloads in flight; removed %d stale staging file(s), freed %s\n", swept, fmtMB(freed))
 			default:
 				fmt.Println("✓ no downloads in flight, nothing to clean")
 			}
