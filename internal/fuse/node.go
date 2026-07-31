@@ -2,7 +2,12 @@ package fuse
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -143,7 +148,37 @@ func (n *lgNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 		}
 		return nil, 0, syscall.EIO
 	}
+	if st != nil {
+		// A download is running for this open — record WHO asked. A burst of
+		// surprise fetches (Spotlight's mdworker, QuickLook thumbnailing, an
+		// editor's indexer crawling the mount) is attributable from lg.log
+		// instead of a mystery.
+		logFetchOpener(ctx, n.b.log, n.rel)
+	}
 	return &lgHandle{f: f, b: n.b, rel: n.rel, fetch: st}, 0, 0
+}
+
+func logFetchOpener(ctx context.Context, log *slog.Logger, rel string) {
+	caller, ok := gofuse.FromContext(ctx)
+	if !ok {
+		return
+	}
+	pid := int(caller.Pid)
+	go func() { // resolving the process name execs ps on macOS; never block the open
+		log.Info("download triggered", "rel", rel, "pid", pid, "proc", procName(pid))
+	}()
+}
+
+// procName resolves a pid to its command name (linux: /proc, darwin: ps).
+func procName(pid int) string {
+	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return "?"
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (n *lgNode) Create(ctx context.Context, name string, flags, mode uint32, out *gofuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
