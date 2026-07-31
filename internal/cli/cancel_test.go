@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/iamtaehyunpark/livegit/internal/config"
@@ -62,5 +63,32 @@ func TestGaugeAndETA(t *testing.T) {
 		if got := fmtETA(in); got != want {
 			t.Fatalf("fmtETA(%v)=%q want %q", in, got, want)
 		}
+	}
+}
+
+func TestResolveDownloadArgs(t *testing.T) {
+	dls := []inflight{
+		{rel: "a/deep/path/file1.jsonl"},
+		{rel: "b/other/file2.jsonl"},
+		{rel: "c/dup/name.bin"},
+		{rel: "d/dup/name.bin"},
+	}
+	// Exact rel and filename fragment both resolve.
+	rels, err := resolveDownloadArgs([]string{"a/deep/path/file1.jsonl", "file2.jsonl"}, dls, "/mnt")
+	if err != nil || len(rels) != 2 || rels[0] != "a/deep/path/file1.jsonl" || rels[1] != "b/other/file2.jsonl" {
+		t.Fatalf("rels=%v err=%v", rels, err)
+	}
+	// Absolute path under the mount resolves.
+	rels, err = resolveDownloadArgs([]string{"/mnt/b/other/file2.jsonl"}, dls, "/mnt")
+	if err != nil || len(rels) != 1 || rels[0] != "b/other/file2.jsonl" {
+		t.Fatalf("abs: rels=%v err=%v", rels, err)
+	}
+	// Ambiguous fragment errors and names both.
+	if _, err := resolveDownloadArgs([]string{"name.bin"}, dls, "/mnt"); err == nil || !strings.Contains(err.Error(), "c/dup/name.bin") {
+		t.Fatalf("ambiguous should error with candidates, got %v", err)
+	}
+	// No match errors.
+	if _, err := resolveDownloadArgs([]string{"zzz.txt"}, dls, "/mnt"); err == nil {
+		t.Fatal("no match must error")
 	}
 }

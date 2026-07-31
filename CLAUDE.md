@@ -164,9 +164,11 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   bytes, %, speed, and ETA (speed sampled from staging-file growth between
   ticks), plus the queued-upload list. Refreshes twice a second; exits when
   the transfers it watched finish (Ctrl-C any time).
-- `lg cancel` — stop all in-flight downloads and delete stale staging files.
-  A live mount is signaled (SIGUSR1 via `.lg/run/mount.pid`) to abort its
-  fetches; blocked readers get EIO, re-opening restarts the download.
+- `lg cancel [path...]` — stop in-flight downloads. Bare: cancel ALL and
+  delete every staging file (clean slate). With paths (exact rel, filename
+  fragment, or mount path): cancel just those, keeping their staging so a
+  re-open resumes. A live mount is signaled (SIGUSR1 via `.lg/run/mount.pid`;
+  targeted rels ride in `.lg/run/cancel.req`); blocked readers get EIO.
 - `lg cache` / `lg cache clear` — show / empty the content cache. Clear always
   keeps files with unflushed journal entries (only copy of local edits) and
   prunes the emptied dir skeleton; everything else refetches on demand.

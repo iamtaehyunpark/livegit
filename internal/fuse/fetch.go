@@ -221,9 +221,22 @@ func (b *Backend) releaseFetchReader(rel string, st *fetchState) {
 	}()
 }
 
-// CancelFetches aborts every in-flight download: each fetch errors out,
-// removes its staging file, and wakes its readers (they see EIO); a later
-// open simply starts a fresh fetch. Returns how many were canceled.
+// CancelFetch aborts one in-flight download by rel (targeted `lg cancel
+// <path>`). Staging is kept, so a later open resumes instead of restarting.
+// Returns false when nothing is downloading at rel.
+func (b *Backend) CancelFetch(rel string) bool {
+	b.fetchMu.Lock()
+	st, ok := b.fetches[config.Rel(rel)]
+	b.fetchMu.Unlock()
+	if ok {
+		st.cancel()
+	}
+	return ok
+}
+
+// CancelFetches aborts every in-flight download: each fetch errors out and
+// wakes its readers (they see EIO); a later open resumes from the kept
+// staging. Returns how many were canceled.
 func (b *Backend) CancelFetches() int {
 	b.fetchMu.Lock()
 	n := len(b.fetches)

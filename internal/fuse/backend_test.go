@@ -1351,3 +1351,46 @@ func TestFetchStaleStagingDiscarded(t *testing.T) {
 		t.Fatalf("content=%q", got)
 	}
 }
+
+// Targeted cancel kills exactly one download; others keep going, and the
+// canceled one keeps its staging for resume.
+func TestCancelFetchTargeted(t *testing.T) {
+	b, src := harness(t)
+	src.put("keep.txt", "0123456789")
+	src.put("drop.txt", "abcdefghij")
+	ctx := context.Background()
+
+	gate := make(chan struct{})
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+	_, stKeep, err := b.StartFetch(ctx, "keep.txt", false)
+	if err != nil || stKeep == nil {
+		t.Fatal(err)
+	}
+	_, stDrop, err := b.StartFetch(ctx, "drop.txt", false)
+	if err != nil || stDrop == nil {
+		t.Fatal(err)
+	}
+	if err := stDrop.wait(ctx, 5); err != nil { // half staged before the cancel
+		t.Fatal(err)
+	}
+
+	if !b.CancelFetch("drop.txt") {
+		t.Fatal("CancelFetch must report the active fetch")
+	}
+	if b.CancelFetch("nope.txt") {
+		t.Fatal("CancelFetch must report false for an unknown rel")
+	}
+	if err := stDrop.wait(ctx, -1); err == nil {
+		t.Fatal("targeted fetch must be canceled")
+	}
+	if fi, err := os.Stat(b.cachePath("drop.txt") + fetchTmpSuffix); err != nil || fi.Size() != 5 {
+		t.Fatalf("targeted cancel must keep staging: %v", err)
+	}
+
+	close(gate)
+	if err := stKeep.wait(ctx, -1); err != nil {
+		t.Fatalf("untargeted fetch must complete: %v", err)
+	}
+}

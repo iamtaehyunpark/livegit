@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -79,8 +80,20 @@ func NewMount(mountpoint string, b *Backend) (*Mount, error) {
 				signal.Stop(usr1)
 				return
 			case <-usr1:
-				n := b.CancelFetches()
-				logx.For("fuse").Info("canceled in-flight downloads", "count", n)
+				// A request file narrows the signal to specific downloads
+				// (`lg cancel <path>`); absent/empty means cancel everything.
+				if rels := takeCancelRequests(); len(rels) > 0 {
+					n := 0
+					for _, rel := range rels {
+						if b.CancelFetch(rel) {
+							n++
+						}
+					}
+					logx.For("fuse").Info("canceled requested downloads", "count", n, "requested", len(rels))
+				} else {
+					n := b.CancelFetches()
+					logx.For("fuse").Info("canceled in-flight downloads", "count", n)
+				}
 			}
 		}
 	}()
@@ -91,6 +104,25 @@ func NewMount(mountpoint string, b *Backend) (*Mount, error) {
 
 // MountPidPath is where a live mount records its pid (`lg cancel` reads it).
 func MountPidPath() string { return filepath.Join(config.Dir(), "run", "mount.pid") }
+
+// CancelReqPath carries the rel list for a targeted cancel: `lg cancel <path>`
+// writes it just before SIGUSR1, the handler consumes it (one rel per line).
+func CancelReqPath() string { return filepath.Join(config.Dir(), "run", "cancel.req") }
+
+func takeCancelRequests() []string {
+	b, err := os.ReadFile(CancelReqPath())
+	if err != nil {
+		return nil
+	}
+	_ = os.Remove(CancelReqPath())
+	var rels []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			rels = append(rels, line)
+		}
+	}
+	return rels
+}
 
 func writeMountPid() {
 	p := MountPidPath()
