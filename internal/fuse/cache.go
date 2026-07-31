@@ -76,6 +76,29 @@ func (b *Backend) EvictOnce() {
 		files = kept
 	}
 
+	// Staging survives interrupted fetches so they can resume; age out the
+	// leftovers nobody came back for (skip anything actively downloading).
+	if idleMin := b.cfg.Cache.EvictAfterIdleMinutes; idleMin > 0 {
+		cutoff := time.Now().Add(-time.Duration(idleMin) * time.Minute)
+		_ = filepath.WalkDir(b.cacheDir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.Contains(filepath.Base(p), fetchTmpSuffix) {
+				return nil
+			}
+			relPath, rerr := filepath.Rel(b.cacheDir, p)
+			if rerr != nil {
+				return nil
+			}
+			rel := strings.TrimSuffix(strings.TrimSuffix(filepath.ToSlash(relPath), fetchIDSuffix), fetchTmpSuffix)
+			if b.fetchActive(config.Rel(rel)) {
+				return nil
+			}
+			if info, ierr := d.Info(); ierr == nil && atimeOf(info).Before(cutoff) {
+				_ = os.Remove(p)
+			}
+			return nil
+		})
+	}
+
 	capBytes := b.capBytes()
 	if capBytes <= 0 || total <= capBytes {
 		return
@@ -101,8 +124,8 @@ func (b *Backend) scanCache() ([]cachedFile, int64) {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(p, fetchTmpSuffix) {
-			return nil // in-flight download staging; not evictable content
+		if strings.Contains(filepath.Base(p), fetchTmpSuffix) {
+			return nil // download staging (+.id sidecar); not cache content
 		}
 		info, ierr := d.Info()
 		if ierr != nil {

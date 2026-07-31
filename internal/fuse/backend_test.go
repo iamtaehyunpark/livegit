@@ -28,6 +28,8 @@ type fakeSource struct {
 	// block between them until the gate closes (or ctx cancels) — simulates a
 	// slow download for the progressive-read and unmount-abort tests.
 	readGate chan struct{}
+
+	lastReadOff int64 // offset of the most recent ReadStream (resume checks)
 }
 
 type fakeFile struct {
@@ -76,19 +78,24 @@ func (s *fakeSource) Stat(_ context.Context, rel string) (proto.FileStat, error)
 		ModTime: f.mod, Mode: f.mode}, nil
 }
 
-func (s *fakeSource) ReadStream(ctx context.Context, rel string, sink func([]byte) error) (proto.FileStat, error) {
+func (s *fakeSource) ReadStream(ctx context.Context, rel string, off int64, sink func([]byte) error) (proto.FileStat, error) {
 	f, ok := s.get(rel)
 	if !ok {
 		return proto.FileStat{Rel: rel}, nil // Exists=false
 	}
-	st := proto.FileStat{Rel: rel, Exists: true, Size: int64(len(f.content)),
-		ModTime: f.mod, Mode: f.mode}
 	s.mu.Lock()
+	s.lastReadOff = off
 	gate := s.readGate
 	s.mu.Unlock()
-	if gate != nil && len(f.content) > 1 {
-		half := len(f.content) / 2
-		if err := sink(f.content[:half]); err != nil {
+	st := proto.FileStat{Rel: rel, Exists: true, Size: int64(len(f.content)),
+		ModTime: f.mod, Mode: f.mode}
+	if off > int64(len(f.content)) {
+		off = int64(len(f.content))
+	}
+	rest := f.content[off:]
+	if gate != nil && len(rest) > 1 {
+		half := len(rest) / 2
+		if err := sink(rest[:half]); err != nil {
 			return proto.FileStat{}, err
 		}
 		select {
@@ -96,12 +103,12 @@ func (s *fakeSource) ReadStream(ctx context.Context, rel string, sink func([]byt
 		case <-ctx.Done():
 			return proto.FileStat{}, ctx.Err()
 		}
-		if err := sink(f.content[half:]); err != nil {
+		if err := sink(rest[half:]); err != nil {
 			return proto.FileStat{}, err
 		}
 		return st, nil
 	}
-	if err := sink(f.content); err != nil {
+	if err := sink(rest); err != nil {
 		return proto.FileStat{}, err
 	}
 	return st, nil
@@ -933,8 +940,8 @@ func TestStopAbortsInflightFetch(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Materialize still blocked after Stop — unmount would hang")
 	}
-	if _, err := os.Stat(b.cachePath("slow.txt") + fetchTmpSuffix); !os.IsNotExist(err) {
-		t.Fatal("aborted fetch must remove its staging file")
+	if _, err := os.Stat(b.cachePath("slow.txt") + fetchTmpSuffix); err != nil {
+		t.Fatal("aborted fetch must KEEP its staging for resume")
 	}
 }
 
@@ -1052,8 +1059,8 @@ func TestCancelFetchesAborts(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Materialize still blocked after CancelFetches")
 	}
-	if _, err := os.Stat(b.cachePath("slow.txt") + fetchTmpSuffix); !os.IsNotExist(err) {
-		t.Fatal("canceled fetch must remove its staging file")
+	if _, err := os.Stat(b.cachePath("slow.txt") + fetchTmpSuffix); err != nil {
+		t.Fatal("canceled fetch must KEEP its staging for resume")
 	}
 	// The backend is still alive: a fresh fetch works once the source unblocks.
 	src.mu.Lock()
@@ -1092,8 +1099,8 @@ func TestAbandonedFetchCanceled(t *testing.T) {
 	if err := st.wait(ctx, -1); err == nil {
 		t.Fatal("abandoned fetch must be canceled, not completed")
 	}
-	if _, err := os.Stat(b.cachePath("skim.txt") + fetchTmpSuffix); !os.IsNotExist(err) {
-		t.Fatal("canceled fetch must remove its staging")
+	if _, err := os.Stat(b.cachePath("skim.txt") + fetchTmpSuffix); err != nil {
+		t.Fatal("abandoned fetch must KEEP its staging for resume")
 	}
 }
 
@@ -1240,5 +1247,107 @@ func TestBackgroundFetchPromotedByJoin(t *testing.T) {
 	}
 	if err := stW.wait(ctx, -1); err != nil {
 		t.Fatalf("promoted fetch must complete: %v", err)
+	}
+}
+
+// An interrupted fetch resumes from its staged bytes instead of restarting
+// from zero (VS Code's open/close cycles on big files used to discard tens of
+// MB per cycle), and the whole-file hash still comes out right.
+func TestFetchResumesFromStaging(t *testing.T) {
+	b, src := harness(t)
+	src.put("big.txt", "0123456789")
+	ctx := context.Background()
+	if err := b.SyncTree(ctx); err != nil { // index meta = resume identity
+		t.Fatal(err)
+	}
+
+	gate := make(chan struct{}) // never opened: first fetch dies at 50%
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+	_, st, err := b.StartFetch(ctx, "big.txt", false)
+	if err != nil || st == nil {
+		t.Fatal(err)
+	}
+	if err := st.wait(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
+	b.CancelFetches()
+	if err := st.wait(ctx, -1); err == nil {
+		t.Fatal("first fetch should have been canceled")
+	}
+	if fi, err := os.Stat(b.cachePath("big.txt") + fetchTmpSuffix); err != nil || fi.Size() != 5 {
+		t.Fatalf("staging after cancel: %v (want 5 bytes kept)", err)
+	}
+
+	// Second attempt must resume at byte 5, complete, and hash correctly.
+	src.mu.Lock()
+	src.readGate = nil
+	src.mu.Unlock()
+	if _, err := b.Materialize(ctx, "big.txt"); err != nil {
+		t.Fatal(err)
+	}
+	src.mu.Lock()
+	resumedAt := src.lastReadOff
+	src.mu.Unlock()
+	if resumedAt != 5 {
+		t.Fatalf("resumed at offset %d, want 5", resumedAt)
+	}
+	got, err := os.ReadFile(b.cachePath("big.txt"))
+	if err != nil || string(got) != "0123456789" {
+		t.Fatalf("content=%q err=%v", got, err)
+	}
+	if e, ok := b.index.Get("big.txt"); !ok || e.Hash != hashx.Bytes([]byte("0123456789")) {
+		t.Fatalf("resumed fetch hash wrong: %+v", e)
+	}
+	if _, err := os.Stat(b.cachePath("big.txt") + fetchTmpSuffix + fetchIDSuffix); !os.IsNotExist(err) {
+		t.Fatal("id sidecar must be gone after commit")
+	}
+}
+
+// Staging from a source file that changed since the interruption must NOT be
+// resumed onto — the id mismatch forces a clean restart.
+func TestFetchStaleStagingDiscarded(t *testing.T) {
+	b, src := harness(t)
+	src.put("f.txt", "0123456789")
+	ctx := context.Background()
+	if err := b.SyncTree(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	gate := make(chan struct{})
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+	_, st, err := b.StartFetch(ctx, "f.txt", false)
+	if err != nil || st == nil {
+		t.Fatal(err)
+	}
+	if err := st.wait(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
+	b.CancelFetches()
+	_ = st.wait(ctx, -1)
+
+	// Source changes; the index learns about it (tree sync).
+	time.Sleep(1100 * time.Millisecond) // ensure a different mtime (unix seconds)
+	src.put("f.txt", "NEWCONTENT")
+	if err := b.SyncTree(ctx); err != nil {
+		t.Fatal(err)
+	}
+	src.mu.Lock()
+	src.readGate = nil
+	src.mu.Unlock()
+	if _, err := b.Materialize(ctx, "f.txt"); err != nil {
+		t.Fatal(err)
+	}
+	src.mu.Lock()
+	off := src.lastReadOff
+	src.mu.Unlock()
+	if off != 0 {
+		t.Fatalf("stale staging must restart from 0, resumed at %d", off)
+	}
+	if got, _ := os.ReadFile(b.cachePath("f.txt")); string(got) != "NEWCONTENT" {
+		t.Fatalf("content=%q", got)
 	}
 }

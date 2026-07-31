@@ -75,8 +75,8 @@ func sweepStaging() (int, int64) {
 	var freed int64
 	dir := config.CacheDir()
 	_ = filepath.WalkDir(dir, func(p string, d iofs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".lg-tmp") {
-			return nil
+		if err != nil || d.IsDir() || !strings.Contains(filepath.Base(p), ".lg-tmp") {
+			return nil // staging is <rel>.lg-tmp plus its .id sidecar
 		}
 		if info, ierr := d.Info(); ierr == nil {
 			if os.Remove(p) == nil {

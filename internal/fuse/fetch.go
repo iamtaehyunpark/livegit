@@ -3,6 +3,7 @@ package fuse
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -156,13 +157,14 @@ func (b *Backend) StartFetch(ctx context.Context, rel string, bg bool) (string, 
 		b.fetchMu.Unlock()
 		return "", nil, fmt.Errorf("offline: cannot fetch %s", rel)
 	}
-	// Create the staging file before registering, so a joining reader can
-	// always open the path this returns.
+	// Create/open the staging file before registering, so a joining reader can
+	// always open the path this returns. NOT truncated here: leftover staging
+	// from an interrupted fetch is a resume candidate (doFetch decides).
 	if err := os.MkdirAll(filepath.Dir(cp), 0o755); err != nil {
 		b.fetchMu.Unlock()
 		return "", nil, err
 	}
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		b.fetchMu.Unlock()
 		return "", nil, err
@@ -232,9 +234,23 @@ func (b *Backend) CancelFetches() int {
 	return n
 }
 
-// fetchTmpSuffix marks a partially-downloaded staging file (skipped by
-// eviction scans; removed on fetch failure).
+// fetchTmpSuffix marks a partially-downloaded staging file. Staging SURVIVES
+// an interrupted fetch (abandonment, `lg cancel`, connection loss, unmount) so
+// the next open resumes where it stopped — apps like VS Code open/close big
+// files repeatedly, and each cycle used to restart the download from zero.
+// The `.id` sidecar pins which source version the staging belongs to.
 const fetchTmpSuffix = ".lg-tmp"
+const fetchIDSuffix = ".id" // appended to the staging path
+
+// fetchID is the source-version identity used to validate resumed staging,
+// derived from the index's current view of the file (watcher + tree sync keep
+// it fresh). Empty when the file isn't in the index yet.
+func (b *Backend) fetchID(rel string) string {
+	if e, ok := b.index.Get(rel); ok && !e.IsDir {
+		return fmt.Sprintf("%d-%d", e.Size, e.ModTime)
+	}
+	return ""
+}
 
 func (b *Backend) runFetch(ctx context.Context, rel, cp, tmp string, f *os.File, st *fetchState) {
 	err := b.doFetch(ctx, rel, cp, tmp, f, st)
@@ -245,8 +261,10 @@ func (b *Backend) runFetch(ctx context.Context, rel, cp, tmp string, f *os.File,
 	}
 	b.wakeFetchGateLocked() // a paused background fetch may get its turn now
 	b.fetchMu.Unlock()
-	if err != nil {
+	if os.IsNotExist(err) {
+		// Nothing to resume onto; other errors KEEP the staging for resume.
 		_ = os.Remove(tmp)
+		_ = os.Remove(tmp + fetchIDSuffix)
 	}
 	st.cancel() // release the stopCtx watcher goroutine
 	st.finish(err)
@@ -279,8 +297,41 @@ func (b *Backend) waitTurn(ctx context.Context, st *fetchState) error {
 }
 
 func (b *Backend) doFetch(ctx context.Context, rel, cp, tmp string, f *os.File, st *fetchState) error {
+	idf := tmp + fetchIDSuffix
 	h := hashx.New()
-	meta, err := b.source.ReadStream(ctx, rel, func(chunk []byte) error {
+
+	// Resume: leftover staging from an interrupted fetch continues where it
+	// stopped when its id sidecar still matches the index's view of the source
+	// file. The hash is re-primed from the staged bytes (local read, cheap).
+	var startOff int64
+	id := b.fetchID(rel)
+	if prev, err := os.ReadFile(idf); err == nil && id != "" && string(prev) == id {
+		if fi, err := f.Stat(); err == nil && fi.Size() > 0 {
+			if primeHasher(h, tmp) == nil {
+				startOff = fi.Size()
+			}
+		}
+	}
+	if startOff == 0 {
+		if err := f.Truncate(0); err != nil {
+			f.Close()
+			return err
+		}
+		if id != "" {
+			_ = os.WriteFile(idf, []byte(id), 0o644)
+		} else {
+			_ = os.Remove(idf)
+		}
+	} else {
+		if _, err := f.Seek(startOff, io.SeekStart); err != nil {
+			f.Close()
+			return err
+		}
+		b.log.Info("resuming download", "rel", rel, "from", startOff)
+		st.advance(startOff)
+	}
+
+	meta, err := b.source.ReadStream(ctx, rel, startOff, func(chunk []byte) error {
 		if werr := b.waitTurn(ctx, st); werr != nil {
 			return werr
 		}
@@ -300,6 +351,14 @@ func (b *Backend) doFetch(ctx context.Context, rel, cp, tmp string, f *os.File, 
 	if !meta.Exists {
 		return os.ErrNotExist
 	}
+	// End guard: if we resumed onto a source that changed while the index was
+	// stale, the staged prefix and the streamed tail are different files —
+	// discard rather than commit a torn mix.
+	if startOff > 0 && fmt.Sprintf("%d-%d", meta.Size, meta.ModTime) != id {
+		_ = os.Remove(tmp)
+		_ = os.Remove(idf)
+		return fmt.Errorf("%s changed on source since the interrupted fetch; discarded staging", rel)
+	}
 	// Preserve Source's mtime on the cache file so Getattr (which reads the
 	// cache file's mtime) returns the correct remote timestamp, not "now".
 	if meta.ModTime > 0 {
@@ -311,6 +370,7 @@ func (b *Backend) doFetch(ctx context.Context, rel, cp, tmp string, f *os.File, 
 	if err := os.Rename(tmp, cp); err != nil {
 		return err
 	}
+	_ = os.Remove(idf)
 	st.mu.Lock()
 	size := st.progress
 	st.mu.Unlock()
@@ -320,6 +380,18 @@ func (b *Backend) doFetch(ctx context.Context, rel, cp, tmp string, f *os.File, 
 	})
 	b.log.Debug("materialized", "rel", rel, "bytes", size)
 	return nil
+}
+
+// primeHasher replays already-staged bytes into the hash so a resumed fetch
+// still produces the whole-file hash.
+func primeHasher(h io.Writer, tmp string) error {
+	r, err := os.Open(tmp)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	_, err = io.Copy(h, r)
+	return err
 }
 
 // OpenForRead opens rel's content for a read-only handle: the finished cache

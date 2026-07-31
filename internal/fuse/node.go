@@ -119,6 +119,11 @@ func (n *lgNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32,
 	osFlags := int(flags) &^ syscall.O_CREAT
 	writable := osFlags&(os.O_WRONLY|os.O_RDWR) != 0
 	if writable {
+		if !cacheFileExists(n.b.cachePath(n.rel)) {
+			// Writable opens fetch too (via Materialize) — attribute them the
+			// same way as read fetches, or they show up as mystery downloads.
+			logFetchOpener(ctx, n.b.log, n.rel)
+		}
 		// Editing needs the complete file — wait for the full materialize.
 		cp, err := n.b.Materialize(ctx, n.rel)
 		if err != nil {

@@ -20,9 +20,10 @@ import (
 // the backend is unit-testable against a fake Source.
 type SourceRPC interface {
 	Stat(ctx context.Context, rel string) (proto.FileStat, error)
-	// ReadStream streams rel's content in order through sink and returns the
-	// file's metadata (Exists=false with nil error when absent on Source).
-	ReadStream(ctx context.Context, rel string, sink func(chunk []byte) error) (proto.FileStat, error)
+	// ReadStream streams rel's content from byte offset off (0 = whole file)
+	// in order through sink and returns the file's metadata (Exists=false with
+	// nil error when absent on Source). off > 0 resumes an interrupted fetch.
+	ReadStream(ctx context.Context, rel string, off int64, sink func(chunk []byte) error) (proto.FileStat, error)
 	// Write applies a single-frame write (mkdir, or content that fits one
 	// chunk). File flushes go through WriteFile, which streams from disk.
 	Write(ctx context.Context, req proto.WriteReq) (proto.WriteAck, error)

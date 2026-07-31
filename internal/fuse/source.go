@@ -41,8 +41,8 @@ func (s *clientSource) Stat(ctx context.Context, rel string) (proto.FileStat, er
 	return resp.Stat, nil
 }
 
-func (s *clientSource) ReadStream(ctx context.Context, rel string, sink func([]byte) error) (proto.FileStat, error) {
-	return readStream(ctx, s.c.FileCall, rel, 0, sink)
+func (s *clientSource) ReadStream(ctx context.Context, rel string, off int64, sink func([]byte) error) (proto.FileStat, error) {
+	return readStream(ctx, s.c.FileCall, rel, 0, off, sink)
 }
 
 func (s *clientSource) Write(ctx context.Context, req proto.WriteReq) (proto.WriteAck, error) {
@@ -85,7 +85,7 @@ func (s *clientSource) Tree(ctx context.Context, have string) ([]proto.TreeEntry
 // (depth-1 prefetch), overlapping network transfer with disk writes. A file
 // that changes on Source mid-fetch fails the read — readers may already have
 // consumed early bytes, so a silent restart could hand out a torn mix.
-func readStream(ctx context.Context, call fileCaller, rel string, maxLen int64, sink func([]byte) error) (proto.FileStat, error) {
+func readStream(ctx context.Context, call fileCaller, rel string, maxLen, startOff int64, sink func([]byte) error) (proto.FileStat, error) {
 	type result struct {
 		chunk proto.ReadResp
 		err   error
@@ -102,9 +102,9 @@ func readStream(ctx context.Context, call fileCaller, rel string, maxLen int64, 
 	}
 
 	var st proto.FileStat
-	var off int64
+	off := startOff
 	next := make(chan result, 1)
-	go fetch(0, next)
+	go fetch(off, next)
 	for first := true; ; first = false {
 		r := <-next
 		if r.err != nil {

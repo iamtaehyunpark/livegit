@@ -46,7 +46,7 @@ func TestReadStreamChunksRoundTrip(t *testing.T) {
 
 	var got []byte
 	chunks := 0
-	st, err := readStream(context.Background(), call, "big.bin", 100, func(c []byte) error {
+	st, err := readStream(context.Background(), call, "big.bin", 100, 0, func(c []byte) error {
 		chunks++
 		got = append(got, c...)
 		return nil
@@ -61,7 +61,7 @@ func TestReadStreamChunksRoundTrip(t *testing.T) {
 		t.Fatalf("size=%d want %d", st.Size, len(content))
 	}
 
-	missing, err := readStream(context.Background(), call, "nope.bin", 100, func([]byte) error {
+	missing, err := readStream(context.Background(), call, "nope.bin", 100, 0, func([]byte) error {
 		t.Fatal("sink must not run for a missing file")
 		return nil
 	})
