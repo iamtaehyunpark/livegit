@@ -155,7 +155,11 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   human. This is how scripts/agents get the mount (`lg shell` needs a tty).
 - `lg unmount` — stop the mount (idempotent: "nothing mounted" is success; also
   clears a leftover/stale mount).
-- `lg status` — connection, toggle on/off, tree-sync freshness, cache, pending writes.
+- `lg status` — connection, toggle on/off, tree-sync freshness, cache, live
+  transfers, pending writes. In-flight downloads show bytes + percentage (read
+  from the `.lg-tmp` staging files against tree-snapshot sizes — no IPC with
+  the mount process); pending uploads list per-file sizes. `--watch`/`-w`
+  refreshes every second.
 - `lg flush` — push pending journal writes to Source now and wait until they
   land (`--timeout` to bound the wait). With a live mount it watches the
   mount's flush worker drain; with no mount it connects and drains the journal
