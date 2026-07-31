@@ -4,11 +4,16 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/iamtaehyunpark/livegit/internal/config"
 	"github.com/iamtaehyunpark/livegit/internal/logx"
 )
 
@@ -60,8 +65,39 @@ func NewMount(mountpoint string, b *Backend) (*Mount, error) {
 	go b.RunTreeSync(ctx)
 	go b.runSnapshotSaver(ctx)
 
+	// `lg cancel` control: the mount process advertises its pid, and SIGUSR1
+	// aborts every in-flight download. Registered here so both `lg mount` and
+	// `lg shell` mounts respond. (Old holders never wrote a pidfile, so a new
+	// `lg cancel` can't accidentally SIGUSR1-kill a handler-less process.)
+	writeMountPid()
+	usr1 := make(chan os.Signal, 1)
+	signal.Notify(usr1, syscall.SIGUSR1)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				signal.Stop(usr1)
+				return
+			case <-usr1:
+				n := b.CancelFetches()
+				logx.For("fuse").Info("canceled in-flight downloads", "count", n)
+			}
+		}
+	}()
+
 	logx.For("fuse").Info("mounted", "mountpoint", mountpoint)
 	return &Mount{server: server, backend: b, cancel: cancel, mountpoint: mountpoint}, nil
+}
+
+// MountPidPath is where a live mount records its pid (`lg cancel` reads it).
+func MountPidPath() string { return filepath.Join(config.Dir(), "run", "mount.pid") }
+
+func writeMountPid() {
+	p := MountPidPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(p, []byte(strconv.Itoa(os.Getpid())), 0o644)
 }
 
 // runSnapshotSaver periodically persists the metadata index so browsing survives
@@ -89,6 +125,7 @@ func (m *Mount) Wait() { m.server.Wait() }
 // Unmount tears down the mount and stops workers.
 func (m *Mount) Unmount() error {
 	logx.For("fuse").Info("unmount requested", "mountpoint", m.mountpoint)
+	_ = os.Remove(MountPidPath())
 	m.cancel()
 	m.backend.Stop()
 	err := m.server.Unmount()

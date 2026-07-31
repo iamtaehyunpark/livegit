@@ -160,6 +160,12 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   from the `.lg-tmp` staging files against tree-snapshot sizes — no IPC with
   the mount process); pending uploads list per-file sizes. `--watch`/`-w`
   refreshes every second.
+- `lg cancel` — stop all in-flight downloads and delete stale staging files.
+  A live mount is signaled (SIGUSR1 via `.lg/run/mount.pid`) to abort its
+  fetches; blocked readers get EIO, re-opening restarts the download.
+- `lg cache` / `lg cache clear` — show / empty the content cache. Clear always
+  keeps files with unflushed journal entries (only copy of local edits) and
+  prunes the emptied dir skeleton; everything else refetches on demand.
 - `lg flush` — push pending journal writes to Source now and wait until they
   land (`--timeout` to bound the wait). With a live mount it watches the
   mount's flush worker drain; with no mount it connects and drains the journal

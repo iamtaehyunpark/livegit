@@ -22,6 +22,8 @@ type fetchState struct {
 	done     bool
 	err      error
 	ch       chan struct{} // closed + replaced on every state change (broadcast)
+
+	cancel context.CancelFunc // aborts this download (`lg cancel`, unmount)
 }
 
 func newFetchState() *fetchState { return &fetchState{ch: make(chan struct{})} }
@@ -116,35 +118,48 @@ func (b *Backend) StartFetch(ctx context.Context, rel string) (string, *fetchSta
 		return "", nil, err
 	}
 	st := newFetchState()
+	// Tied to b.stop, NOT to the opener's kernel context: several readers may
+	// share this fetch, and it completes the cache even if the first reader
+	// gives up. Unmount (Stop) and `lg cancel` (st.cancel) abort it.
+	fctx, cancel := b.stopCtx(context.Background())
+	st.cancel = cancel
 	b.fetches[rel] = st
 	b.fetchMu.Unlock()
 
-	go b.runFetch(rel, cp, tmp, f, st)
+	go b.runFetch(fctx, rel, cp, tmp, f, st)
 	return tmp, st, nil
+}
+
+// CancelFetches aborts every in-flight download: each fetch errors out,
+// removes its staging file, and wakes its readers (they see EIO); a later
+// open simply starts a fresh fetch. Returns how many were canceled.
+func (b *Backend) CancelFetches() int {
+	b.fetchMu.Lock()
+	n := len(b.fetches)
+	for _, st := range b.fetches {
+		st.cancel()
+	}
+	b.fetchMu.Unlock()
+	return n
 }
 
 // fetchTmpSuffix marks a partially-downloaded staging file (skipped by
 // eviction scans; removed on fetch failure).
 const fetchTmpSuffix = ".lg-tmp"
 
-func (b *Backend) runFetch(rel, cp, tmp string, f *os.File, st *fetchState) {
-	err := b.doFetch(rel, cp, tmp, f, st)
+func (b *Backend) runFetch(ctx context.Context, rel, cp, tmp string, f *os.File, st *fetchState) {
+	err := b.doFetch(ctx, rel, cp, tmp, f, st)
 	b.fetchMu.Lock()
 	delete(b.fetches, rel)
 	b.fetchMu.Unlock()
 	if err != nil {
 		_ = os.Remove(tmp)
 	}
+	st.cancel() // release the stopCtx watcher goroutine
 	st.finish(err)
 }
 
-func (b *Backend) doFetch(rel, cp, tmp string, f *os.File, st *fetchState) error {
-	// Tied to b.stop, NOT to the opener's kernel context: several readers may
-	// share this fetch, and it completes the cache even if the first reader
-	// gives up. Unmount (Stop) aborts it immediately.
-	ctx, cancel := b.stopCtx(context.Background())
-	defer cancel()
-
+func (b *Backend) doFetch(ctx context.Context, rel, cp, tmp string, f *os.File, st *fetchState) error {
 	h := hashx.New()
 	meta, err := b.source.ReadStream(ctx, rel, func(chunk []byte) error {
 		if _, werr := f.Write(chunk); werr != nil {

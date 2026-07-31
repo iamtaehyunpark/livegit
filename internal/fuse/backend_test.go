@@ -1021,3 +1021,45 @@ func TestRenameDirServerSide(t *testing.T) {
 		t.Fatal("old subtree should be gone from the index")
 	}
 }
+
+// CancelFetches must abort every in-flight download promptly (readers get an
+// error, staging is removed) without stopping the backend itself.
+func TestCancelFetchesAborts(t *testing.T) {
+	b, src := harness(t)
+	src.put("slow.txt", "0123456789")
+	gate := make(chan struct{}) // never closed
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Materialize(context.Background(), "slow.txt")
+		done <- err
+	}()
+	for i := 0; i < 200 && !b.fetchActive("slow.txt"); i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if n := b.CancelFetches(); n != 1 {
+		t.Fatalf("canceled %d fetches, want 1", n)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Materialize must fail when its fetch is canceled")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Materialize still blocked after CancelFetches")
+	}
+	if _, err := os.Stat(b.cachePath("slow.txt") + fetchTmpSuffix); !os.IsNotExist(err) {
+		t.Fatal("canceled fetch must remove its staging file")
+	}
+	// The backend is still alive: a fresh fetch works once the source unblocks.
+	src.mu.Lock()
+	src.readGate = nil
+	src.mu.Unlock()
+	if _, err := b.Materialize(context.Background(), "slow.txt"); err != nil {
+		t.Fatalf("fresh fetch after cancel: %v", err)
+	}
+}
