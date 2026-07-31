@@ -47,3 +47,20 @@ func TestClearCacheKeepsPending(t *testing.T) {
 		t.Fatal("sweep must not touch real cache content")
 	}
 }
+
+func TestGaugeAndETA(t *testing.T) {
+	if g := gauge(0.5, 10); g != "[█████░░░░░]" {
+		t.Fatalf("gauge(0.5)=%q", g)
+	}
+	if g := gauge(0, 10); g != "[░░░░░░░░░░]" {
+		t.Fatalf("gauge(0)=%q", g)
+	}
+	if g := gauge(1.7, 10); g != "[██████████]" {
+		t.Fatalf("gauge(clamped)=%q", g)
+	}
+	for in, want := range map[float64]string{75: "1:15", 3725: "1:02:05", -1: "--:--"} {
+		if got := fmtETA(in); got != want {
+			t.Fatalf("fmtETA(%v)=%q want %q", in, got, want)
+		}
+	}
+}

@@ -160,6 +160,10 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   from the `.lg-tmp` staging files against tree-snapshot sizes — no IPC with
   the mount process); pending uploads list per-file sizes. `--watch`/`-w`
   refreshes every second.
+- `lg progress` — live transfer monitor: one gauge per in-flight download with
+  bytes, %, speed, and ETA (speed sampled from staging-file growth between
+  ticks), plus the queued-upload list. Refreshes twice a second; exits when
+  the transfers it watched finish (Ctrl-C any time).
 - `lg cancel` — stop all in-flight downloads and delete stale staging files.
   A live mount is signaled (SIGUSR1 via `.lg/run/mount.pid`) to abort its
   fetches; blocked readers get EIO, re-opening restarts the download.

@@ -57,6 +57,7 @@ func NewRoot() *cobra.Command {
 		newToggleCmd(),
 		newLocalCmd(),
 		newStatusCmd(),
+		newProgressCmd(),
 		newFlushCmd(),
 		newCancelCmd(),
 		newCacheCmd(),
