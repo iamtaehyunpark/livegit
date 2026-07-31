@@ -1063,3 +1063,93 @@ func TestCancelFetchesAborts(t *testing.T) {
 		t.Fatalf("fresh fetch after cancel: %v", err)
 	}
 }
+
+// A consumer that skims and closes (Finder preview, editor indexer) must not
+// cost a whole-file download: when the last reader is gone, the fetch is
+// canceled after the grace period.
+func TestAbandonedFetchCanceled(t *testing.T) {
+	b, src := harness(t)
+	src.put("skim.txt", "0123456789")
+	gate := make(chan struct{}) // never opened: fetch stuck at 50%
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+	oldGrace, oldTail := fetchAbandonGrace, fetchAbandonTail
+	fetchAbandonGrace, fetchAbandonTail = 30*time.Millisecond, 0
+	t.Cleanup(func() { fetchAbandonGrace, fetchAbandonTail = oldGrace, oldTail })
+
+	ctx := context.Background()
+	f, st, err := b.OpenForRead(ctx, "skim.txt")
+	if err != nil || st == nil {
+		t.Fatalf("OpenForRead: st=%v err=%v", st, err)
+	}
+	if err := st.wait(ctx, 5); err != nil { // the skim: first half arrives
+		t.Fatal(err)
+	}
+	f.Close()
+	b.releaseFetchReader("skim.txt", st) // what handle Release does
+
+	if err := st.wait(ctx, -1); err == nil {
+		t.Fatal("abandoned fetch must be canceled, not completed")
+	}
+	if _, err := os.Stat(b.cachePath("skim.txt") + fetchTmpSuffix); !os.IsNotExist(err) {
+		t.Fatal("canceled fetch must remove its staging")
+	}
+}
+
+// A second reader keeps the fetch alive when the first walks away, and a
+// nearly-done fetch completes even with no readers (tail exception).
+func TestAbandonSecondReaderAndTail(t *testing.T) {
+	b, src := harness(t)
+	src.put("shared.txt", "0123456789")
+	src.put("neardone.txt", "0123456789")
+	if err := b.SyncTree(context.Background()); err != nil { // index sizes for the tail check
+		t.Fatal(err)
+	}
+	gate := make(chan struct{})
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+	oldGrace := fetchAbandonGrace
+	fetchAbandonGrace = 30 * time.Millisecond
+	t.Cleanup(func() { fetchAbandonGrace = oldGrace })
+
+	ctx := context.Background()
+	f1, st, err := b.OpenForRead(ctx, "shared.txt")
+	if err != nil || st == nil {
+		t.Fatal(err)
+	}
+	defer f1.Close()
+	f2, st2, err := b.OpenForRead(ctx, "shared.txt")
+	if err != nil || st2 != st {
+		t.Fatalf("second open must join the same fetch (st2=%v err=%v)", st2, err)
+	}
+	f2.Close()
+	b.releaseFetchReader("shared.txt", st) // reader 2 leaves; reader 1 stays
+	time.Sleep(100 * time.Millisecond)     // past the grace period
+	close(gate)
+	if err := st.wait(ctx, -1); err != nil {
+		t.Fatalf("fetch with a live reader must complete: %v", err)
+	}
+
+	// Tail exception: abandoned, but remaining bytes are under the threshold
+	// (10-byte file, 16MB threshold) — completes and warms the cache.
+	gate2 := make(chan struct{})
+	src.mu.Lock()
+	src.readGate = gate2
+	src.mu.Unlock()
+	f3, st3, err := b.OpenForRead(ctx, "neardone.txt")
+	if err != nil || st3 == nil {
+		t.Fatal(err)
+	}
+	f3.Close()
+	b.releaseFetchReader("neardone.txt", st3)
+	time.Sleep(100 * time.Millisecond) // grace passes; tail rule keeps it alive
+	close(gate2)
+	if err := st3.wait(ctx, -1); err != nil {
+		t.Fatalf("nearly-done abandoned fetch must complete: %v", err)
+	}
+	if !cacheFileExists(b.cachePath("neardone.txt")) {
+		t.Fatal("tail-excepted fetch must land in the cache")
+	}
+}

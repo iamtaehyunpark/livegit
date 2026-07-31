@@ -267,6 +267,8 @@ func (b *Backend) Materialize(ctx context.Context, rel string) (string, error) {
 	if st == nil {
 		return path, nil // already cached
 	}
+	st.addReader() // a waiter counts as a consumer (abandonment policy)
+	defer b.releaseFetchReader(rel, st)
 	if err := st.wait(ctx, -1); err != nil {
 		return "", err
 	}

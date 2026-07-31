@@ -427,6 +427,10 @@ lg unmount; ssh galaxy-04 'pkill -f "lg serve"'`.
 
 ## Known gaps / TODO
 
+- **`ROADMAP.md`** holds the pre-scoped platform upgrade paths (Linux/Windows
+  Ghost, macOS FSKit/FileProvider) with triggers and effort — execute per
+  demand; none needed while lg has one user.
+
 - A `make deploy-source` one-step redeploy of the Linux binary to Source.
 - A `lg doctor` that checks config + ssh reachability + remote agent + remote_root
   + macFUSE + stale mounts in one non-interactive command (great for agent tests).

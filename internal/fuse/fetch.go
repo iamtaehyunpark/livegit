@@ -21,9 +21,33 @@ type fetchState struct {
 	progress int64 // bytes written to the staging file so far
 	done     bool
 	err      error
+	readers  int           // active consumers (read handles + Materialize waiters)
 	ch       chan struct{} // closed + replaced on every state change (broadcast)
 
-	cancel context.CancelFunc // aborts this download (`lg cancel`, unmount)
+	total  int64              // expected size from the index (0 = unknown); set before publish
+	cancel context.CancelFunc // aborts this download (`lg cancel`, unmount, abandonment)
+}
+
+func (f *fetchState) addReader() {
+	f.mu.Lock()
+	f.readers++
+	f.mu.Unlock()
+}
+
+// dropReader removes one consumer; true means the fetch is now abandoned
+// (no readers left and still downloading).
+func (f *fetchState) dropReader() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readers--
+	return f.readers == 0 && !f.done
+}
+
+// abandoned re-checks after the grace period: still zero readers, still going.
+func (f *fetchState) abandoned() (int64, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.progress, f.readers == 0 && !f.done
 }
 
 func newFetchState() *fetchState { return &fetchState{ch: make(chan struct{})} }
@@ -119,15 +143,50 @@ func (b *Backend) StartFetch(ctx context.Context, rel string) (string, *fetchSta
 	}
 	st := newFetchState()
 	// Tied to b.stop, NOT to the opener's kernel context: several readers may
-	// share this fetch, and it completes the cache even if the first reader
-	// gives up. Unmount (Stop) and `lg cancel` (st.cancel) abort it.
+	// share this fetch. Unmount (Stop), `lg cancel`, and abandonment (last
+	// reader gone, see releaseFetchReader) abort it via st.cancel.
 	fctx, cancel := b.stopCtx(context.Background())
 	st.cancel = cancel
+	if e, ok := b.index.Get(rel); ok {
+		st.total = e.Size // for the nearly-done exception on abandonment
+	}
 	b.fetches[rel] = st
 	b.fetchMu.Unlock()
 
 	go b.runFetch(fctx, rel, cp, tmp, f, st)
 	return tmp, st, nil
+}
+
+// Abandonment policy: a consumer that opens, skims the head, and closes
+// (Finder previews, QuickLook, editor indexers — a browse of one folder used
+// to pull 700 MB of junk) must not cost a whole-file download. The grace
+// period covers Finder's quick close-and-reopen double-tap; a fetch within
+// the tail threshold of finishing completes anyway (cheap cache win).
+var (
+	fetchAbandonGrace = 3 * time.Second
+	fetchAbandonTail  = int64(16 << 20)
+)
+
+// releaseFetchReader drops one consumer of an in-flight fetch; when the last
+// one walks away mid-download, the fetch is canceled after the grace period
+// instead of pulling the rest of the file for nobody. A real consumer (cp,
+// cat, a drag-copy) holds its handle to EOF, so its fetch always completes.
+func (b *Backend) releaseFetchReader(rel string, st *fetchState) {
+	if st == nil || !st.dropReader() {
+		return
+	}
+	go func() {
+		time.Sleep(fetchAbandonGrace)
+		progress, abandoned := st.abandoned()
+		if !abandoned {
+			return
+		}
+		if st.total > 0 && st.total-progress <= fetchAbandonTail {
+			return // nearly done: let it finish and warm the cache
+		}
+		b.log.Info("canceling abandoned download", "rel", rel, "got", progress)
+		st.cancel()
+	}()
 }
 
 // CancelFetches aborts every in-flight download: each fetch errors out,
@@ -212,6 +271,9 @@ func (b *Backend) OpenForRead(ctx context.Context, rel string) (*os.File, *fetch
 		}
 		f, oerr := os.Open(path)
 		if oerr == nil {
+			if st != nil {
+				st.addReader() // paired with releaseFetchReader on handle Release
+			}
 			return f, st, nil
 		}
 		if st != nil && os.IsNotExist(oerr) {

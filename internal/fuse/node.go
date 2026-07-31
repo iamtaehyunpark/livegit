@@ -381,6 +381,11 @@ func (h *lgHandle) Flush(ctx context.Context) syscall.Errno {
 func (h *lgHandle) Release(ctx context.Context) syscall.Errno {
 	errno := h.journalIfDirty()
 	_ = h.f.Close()
+	if h.fetch != nil {
+		// Last reader gone while the download runs? The backend cancels it
+		// after a grace period (Finder-preview skims must not cost full files).
+		h.b.releaseFetchReader(h.rel, h.fetch)
+	}
 	return errno
 }
 
