@@ -100,7 +100,7 @@ func printStatus(c *config.Config) error {
 				line += fmt.Sprintf(" / %s (%d%%)", fmtMB(d.total), d.staged*100/d.total)
 			}
 			if d.stalled {
-				line += "  [stalled — leftover of an interrupted fetch]"
+				line += "  [paused or stalled]"
 			}
 			fmt.Println(line)
 		}

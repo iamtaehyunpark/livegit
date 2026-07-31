@@ -95,7 +95,7 @@ func renderDownload(d inflight, speeds map[string]*speedSample) string {
 	}
 	line := "  " + name + "\n"
 	if d.stalled {
-		return line + fmt.Sprintf("  %s  %s  [stalled — `lg cancel` cleans this up]\n",
+		return line + fmt.Sprintf("  %s  %s  [paused or stalled — `lg cancel` drops it]\n",
 			gauge(frac(d), 28), fmtMB(d.staged))
 	}
 	stats := fmtMB(d.staged)

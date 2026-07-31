@@ -26,6 +26,23 @@ type fetchState struct {
 
 	total  int64              // expected size from the index (0 = unknown); set before publish
 	cancel context.CancelFunc // aborts this download (`lg cancel`, unmount, abandonment)
+
+	// bg marks a fetch whose openers are all background machinery (Finder
+	// previews, QuickLook, Spotlight). Background fetches yield the link to
+	// user fetches (see waitTurn); a real app joining promotes the fetch.
+	bg bool
+}
+
+func (f *fetchState) progressNow() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.progress
+}
+
+func (f *fetchState) background() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.bg
 }
 
 func (f *fetchState) addReader() {
@@ -112,8 +129,10 @@ func (b *Backend) stopCtx(parent context.Context) (context.Context, context.Canc
 // StartFetch ensures rel's content is cached or downloading. It returns the
 // path to read from — the final cache file when content is already present
 // (st == nil), or the growing staging file plus its fetchState while a
-// download is in flight.
-func (b *Backend) StartFetch(ctx context.Context, rel string) (string, *fetchState, error) {
+// download is in flight. bg marks a fetch requested by background machinery
+// (Finder previews, QuickLook, Spotlight): those yield the link to user
+// fetches. A non-bg request joining an existing bg fetch promotes it.
+func (b *Backend) StartFetch(ctx context.Context, rel string, bg bool) (string, *fetchState, error) {
 	rel = config.Rel(rel)
 	cp := b.cachePath(rel)
 	if cacheFileExists(cp) {
@@ -123,6 +142,13 @@ func (b *Backend) StartFetch(ctx context.Context, rel string) (string, *fetchSta
 
 	b.fetchMu.Lock()
 	if st, ok := b.fetches[rel]; ok {
+		if !bg && st.background() {
+			st.mu.Lock()
+			st.bg = false
+			st.mu.Unlock()
+			b.normalFetches++
+			b.wakeFetchGateLocked()
+		}
 		b.fetchMu.Unlock()
 		return tmp, st, nil
 	}
@@ -147,10 +173,14 @@ func (b *Backend) StartFetch(ctx context.Context, rel string) (string, *fetchSta
 	// reader gone, see releaseFetchReader) abort it via st.cancel.
 	fctx, cancel := b.stopCtx(context.Background())
 	st.cancel = cancel
+	st.bg = bg
 	if e, ok := b.index.Get(rel); ok {
 		st.total = e.Size // for the nearly-done exception on abandonment
 	}
 	b.fetches[rel] = st
+	if !bg {
+		b.normalFetches++
+	}
 	b.fetchMu.Unlock()
 
 	go b.runFetch(fctx, rel, cp, tmp, f, st)
@@ -210,6 +240,10 @@ func (b *Backend) runFetch(ctx context.Context, rel, cp, tmp string, f *os.File,
 	err := b.doFetch(ctx, rel, cp, tmp, f, st)
 	b.fetchMu.Lock()
 	delete(b.fetches, rel)
+	if !st.background() {
+		b.normalFetches--
+	}
+	b.wakeFetchGateLocked() // a paused background fetch may get its turn now
 	b.fetchMu.Unlock()
 	if err != nil {
 		_ = os.Remove(tmp)
@@ -218,9 +252,38 @@ func (b *Backend) runFetch(ctx context.Context, rel, cp, tmp string, f *os.File,
 	st.finish(err)
 }
 
+func (b *Backend) wakeFetchGateLocked() {
+	close(b.fetchGate)
+	b.fetchGate = make(chan struct{})
+}
+
+// waitTurn pauses a background fetch while any user fetch is active — one
+// Finder-preview crawl must not halve the link of the copy the user actually
+// asked for. Promotion (a real app joining) or the user fetches finishing
+// resumes it; ctx cancellation (abandonment, `lg cancel`, unmount) ends it.
+func (b *Backend) waitTurn(ctx context.Context, st *fetchState) error {
+	for {
+		b.fetchMu.Lock()
+		wait := st.background() && b.normalFetches > 0
+		gate := b.fetchGate
+		b.fetchMu.Unlock()
+		if !wait {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-gate:
+		}
+	}
+}
+
 func (b *Backend) doFetch(ctx context.Context, rel, cp, tmp string, f *os.File, st *fetchState) error {
 	h := hashx.New()
 	meta, err := b.source.ReadStream(ctx, rel, func(chunk []byte) error {
+		if werr := b.waitTurn(ctx, st); werr != nil {
+			return werr
+		}
 		if _, werr := f.Write(chunk); werr != nil {
 			return werr
 		}
@@ -264,8 +327,9 @@ func (b *Backend) doFetch(ctx context.Context, rel, cp, tmp string, f *os.File, 
 // The tiny retry absorbs the race where the fetch completes (staging renamed
 // away) between StartFetch and the open.
 func (b *Backend) OpenForRead(ctx context.Context, rel string) (*os.File, *fetchState, error) {
+	bg := callerIsBackground(ctx)
 	for attempt := 0; attempt < 3; attempt++ {
-		path, st, err := b.StartFetch(ctx, rel)
+		path, st, err := b.StartFetch(ctx, rel, bg)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -59,8 +59,12 @@ type Backend struct {
 
 	// fetches tracks in-flight content downloads so concurrent opens share one
 	// transfer and eviction skips files still being written (see fetch.go).
-	fetchMu sync.Mutex
-	fetches map[string]*fetchState
+	// normalFetches counts the non-background ones; while any is active,
+	// background fetches pause (fetchGate broadcasts scheduling changes).
+	fetchMu       sync.Mutex
+	fetches       map[string]*fetchState
+	normalFetches int
+	fetchGate     chan struct{}
 
 	// treeDigest identifies the last tree snapshot applied by SyncTree, echoed
 	// to Source so an unchanged tree costs no transfer. Only the RunTreeSync
@@ -87,7 +91,8 @@ func (b *Backend) capBytes() int64 {
 // NewBackend assembles the Ghost FUSE backend.
 func NewBackend(cfg *config.Config, journal *Journal, source SourceRPC, matcher *config.Matcher) *Backend {
 	return &Backend{
-		fetches:  map[string]*fetchState{},
+		fetches:   map[string]*fetchState{},
+		fetchGate: make(chan struct{}),
 		index:    NewIndex(filepath.Join(config.Dir(), "tree.json")),
 		journal:  journal,
 		cacheDir: config.CacheDir(),
@@ -260,7 +265,7 @@ func (b *Backend) RunTreeSync(ctx context.Context) {
 // whole-file buffer, shared with any concurrent readers.
 func (b *Backend) Materialize(ctx context.Context, rel string) (string, error) {
 	rel = config.Rel(rel)
-	path, st, err := b.StartFetch(ctx, rel)
+	path, st, err := b.StartFetch(ctx, rel, false) // full-waiters are user intent
 	if err != nil {
 		return "", err
 	}

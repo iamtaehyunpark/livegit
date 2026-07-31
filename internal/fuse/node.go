@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,6 +168,45 @@ func logFetchOpener(ctx context.Context, log *slog.Logger, rel string) {
 	go func() { // resolving the process name execs ps on macOS; never block the open
 		log.Info("download triggered", "rel", rel, "pid", pid, "proc", procName(pid))
 	}()
+}
+
+// bgProcs are macOS's background crawlers (preview/thumbnail/indexing
+// machinery). Downloads they trigger yield the link to user fetches — one
+// Finder browse used to halve the speed of the copy the user actually asked
+// for. Deliberately NOT a denylist: alone, these still download at full speed.
+// Finder is here because its own reads are preview passes; a user double-click
+// hands the file to a real app (VS Code, Preview…), which joins the fetch and
+// promotes it.
+var bgProcs = map[string]bool{
+	"Finder":                              true,
+	"CoreServicesUIAgent":                 true,
+	"quicklookd":                          true,
+	"QuickLookUIService":                  true,
+	"QuickLookSatellite":                  true,
+	"com.apple.quicklook.ThumbnailsAgent": true,
+	"mdworker":                            true,
+	"mdworker_shared":                     true,
+	"mds":                                 true,
+	"mds_stores":                          true,
+	"mdbulkimport":                        true,
+	"mdsync":                              true,
+}
+
+// bgPidCache remembers each pid's classification — resolving a name execs ps
+// on macOS, so pay that once per process, not per open.
+var bgPidCache sync.Map
+
+func callerIsBackground(ctx context.Context) bool {
+	caller, ok := gofuse.FromContext(ctx)
+	if !ok {
+		return false
+	}
+	if v, ok := bgPidCache.Load(caller.Pid); ok {
+		return v.(bool)
+	}
+	bg := bgProcs[filepath.Base(procName(int(caller.Pid)))]
+	bgPidCache.Store(caller.Pid, bg)
+	return bg
 }
 
 // procName resolves a pid to its command name (linux: /proc, darwin: ps).

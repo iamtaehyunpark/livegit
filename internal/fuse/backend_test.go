@@ -1153,3 +1153,92 @@ func TestAbandonSecondReaderAndTail(t *testing.T) {
 		t.Fatal("tail-excepted fetch must land in the cache")
 	}
 }
+
+// Background fetches (Finder/QuickLook/Spotlight) yield the link while a user
+// fetch is active, resume when it finishes, and get promoted to user priority
+// when a real consumer joins them.
+func TestBackgroundFetchYieldsToNormal(t *testing.T) {
+	b, src := harness(t)
+	src.put("user.txt", "0123456789")
+	src.put("junk.txt", "abcdefghij")
+	ctx := context.Background()
+
+	// A gated USER fetch holds the "normal active" state.
+	gate := make(chan struct{})
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+	_, stUser, err := b.OpenForRead(ctx, "user.txt") // no FUSE caller ctx -> normal
+	if err != nil || stUser == nil {
+		t.Fatal(err)
+	}
+	if err := stUser.wait(ctx, 5); err != nil { // its first half has landed
+		t.Fatal(err)
+	}
+
+	// A BACKGROUND fetch starts but must not move a byte while the user fetch runs
+	// (its source is ungated — only the scheduler holds it back).
+	src.mu.Lock()
+	src.readGate = nil
+	src.mu.Unlock()
+	_, stJunk, err := b.StartFetch(ctx, "junk.txt", true)
+	if err != nil || stJunk == nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if p := stJunk.progressNow(); p != 0 {
+		t.Fatalf("background fetch moved %d bytes while a user fetch was active", p)
+	}
+
+	// User fetch finishes -> background fetch resumes and completes.
+	close(gate)
+	if err := stUser.wait(ctx, -1); err != nil {
+		t.Fatal(err)
+	}
+	if err := stJunk.wait(ctx, -1); err != nil {
+		t.Fatalf("background fetch must complete once the link is free: %v", err)
+	}
+	if got, err := os.ReadFile(b.cachePath("junk.txt")); err != nil || string(got) != "abcdefghij" {
+		t.Fatalf("junk content=%q err=%v", got, err)
+	}
+}
+
+func TestBackgroundFetchPromotedByJoin(t *testing.T) {
+	b, src := harness(t)
+	src.put("user.txt", "0123456789")
+	src.put("wanted.txt", "abcdefghij")
+	ctx := context.Background()
+
+	gate := make(chan struct{})
+	defer close(gate)
+	src.mu.Lock()
+	src.readGate = gate
+	src.mu.Unlock()
+	_, stUser, err := b.OpenForRead(ctx, "user.txt") // held user fetch
+	if err != nil || stUser == nil {
+		t.Fatal(err)
+	}
+	if err := stUser.wait(ctx, 5); err != nil {
+		t.Fatal(err)
+	}
+
+	src.mu.Lock()
+	src.readGate = nil
+	src.mu.Unlock()
+	_, stW, err := b.StartFetch(ctx, "wanted.txt", true) // Finder preview starts it…
+	if err != nil || stW == nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if p := stW.progressNow(); p != 0 {
+		t.Fatal("background fetch should be paused")
+	}
+	// …then the user's app opens the same file: promoted, runs despite the
+	// still-active user fetch.
+	if _, st2, err := b.StartFetch(ctx, "wanted.txt", false); err != nil || st2 != stW {
+		t.Fatalf("join must return the same fetch (err=%v)", err)
+	}
+	if err := stW.wait(ctx, -1); err != nil {
+		t.Fatalf("promoted fetch must complete: %v", err)
+	}
+}
