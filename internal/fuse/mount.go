@@ -71,6 +71,7 @@ func NewMount(mountpoint string, b *Backend) (*Mount, error) {
 	// `lg shell` mounts respond. (Old holders never wrote a pidfile, so a new
 	// `lg cancel` can't accidentally SIGUSR1-kill a handler-less process.)
 	writeMountPid()
+	writeMountCaps()
 	usr1 := make(chan os.Signal, 1)
 	signal.Notify(usr1, syscall.SIGUSR1)
 	go func() {
@@ -98,6 +99,27 @@ func NewMount(mountpoint string, b *Backend) (*Mount, error) {
 		}
 	}()
 
+	// `lg pending drop` control: SIGUSR2 makes the mount drop queued journal
+	// entries. The mount owns the journal (in memory + on disk), so the CLI
+	// must never edit journal.log under a live mount — it asks through here.
+	usr2 := make(chan os.Signal, 1)
+	signal.Notify(usr2, syscall.SIGUSR2)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				signal.Stop(usr2)
+				return
+			case <-usr2:
+				// Same shape as the cancel request file: one rel per line
+				// narrows the drop; absent/empty means drop everything.
+				rels := takeRequests(DropReqPath())
+				n := b.DropPending(rels)
+				_ = os.WriteFile(DropAckPath(), []byte(strconv.Itoa(n)), 0o644)
+			}
+		}
+	}()
+
 	logx.For("fuse").Info("mounted", "mountpoint", mountpoint)
 	return &Mount{server: server, backend: b, cancel: cancel, mountpoint: mountpoint}, nil
 }
@@ -109,12 +131,40 @@ func MountPidPath() string { return filepath.Join(config.Dir(), "run", "mount.pi
 // writes it just before SIGUSR1, the handler consumes it (one rel per line).
 func CancelReqPath() string { return filepath.Join(config.Dir(), "run", "cancel.req") }
 
-func takeCancelRequests() []string {
-	b, err := os.ReadFile(CancelReqPath())
+// MountCapsPath marks a mount that installs the SIGUSR2 (drop) handler. A
+// mount from an older build wrote a pidfile but has no handler, so SIGUSR2
+// would KILL it — `lg pending drop` checks for this file before signaling.
+func MountCapsPath() string { return filepath.Join(config.Dir(), "run", "mount.caps") }
+
+func writeMountCaps() {
+	p := MountCapsPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(p, []byte("usr2=drop\n"), 0o644)
+}
+
+// HandlesDropSignal reports whether the live mount understands SIGUSR2.
+func HandlesDropSignal() bool {
+	_, err := os.Stat(MountCapsPath())
+	return err == nil
+}
+
+// DropReqPath carries the rel list for a targeted `lg pending drop <path>`;
+// DropAckPath is where the mount reports how many entries it dropped, so the
+// CLI can print a real count instead of guessing.
+func DropReqPath() string { return filepath.Join(config.Dir(), "run", "drop.req") }
+func DropAckPath() string { return filepath.Join(config.Dir(), "run", "drop.ack") }
+
+func takeCancelRequests() []string { return takeRequests(CancelReqPath()) }
+
+// takeRequests reads and consumes a one-rel-per-line request file.
+func takeRequests(path string) []string {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
-	_ = os.Remove(CancelReqPath())
+	_ = os.Remove(path)
 	var rels []string
 	for _, line := range strings.Split(string(b), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
@@ -158,6 +208,7 @@ func (m *Mount) Wait() { m.server.Wait() }
 func (m *Mount) Unmount() error {
 	logx.For("fuse").Info("unmount requested", "mountpoint", m.mountpoint)
 	_ = os.Remove(MountPidPath())
+	_ = os.Remove(MountCapsPath())
 	m.cancel()
 	m.backend.Stop()
 	err := m.server.Unmount()

@@ -2,6 +2,7 @@ package fuse
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,8 @@ type fakeSource struct {
 	readGate chan struct{}
 
 	lastReadOff int64 // offset of the most recent ReadStream (resume checks)
+
+	delDeny map[string]bool // rels whose Delete always fails (permission denied)
 }
 
 type fakeFile struct {
@@ -158,6 +161,11 @@ func (s *fakeSource) Rename(_ context.Context, req proto.RenameReq) (proto.Renam
 func (s *fakeSource) Delete(_ context.Context, req proto.DelReq) (proto.DelAck, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.delDeny[req.Rel] {
+		// Source refuses permanently (the live case: EACCES on a file owned by
+		// another user). Surfaces as an RPC error, not a conflict ack.
+		return proto.DelAck{}, errors.New("permission denied")
+	}
 	delete(s.files, req.Rel)
 	return proto.DelAck{OK: true}, nil
 }

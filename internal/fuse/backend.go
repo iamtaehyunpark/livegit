@@ -72,6 +72,12 @@ type Backend struct {
 	// goroutine touches it.
 	treeDigest string
 
+	// forceTree makes the next SyncTree ignore treeDigest and re-apply the
+	// whole tree. Set when the local view must be rebuilt from Source even
+	// though Source itself didn't change — dropping pending deletes, which
+	// removed those paths from the index (`lg pending drop`).
+	forceTree atomic.Bool
+
 	// synced flips true after the first successful full-tree sync. From then on
 	// the index is authoritative for negatives: Getattr answers ENOENT locally
 	// instead of paying a per-lookup remote Stat (macOS probes nonexistent names
@@ -131,7 +137,11 @@ func (b *Backend) SyncTree(ctx context.Context) error {
 	// snapshot but still present in the fetched tree — without the union it
 	// would be resurrected from the stale tree until the next refresh.
 	pend := b.journal.PendingSnapshot()
-	entries, digest, unchanged, err := b.source.Tree(ctx, b.treeDigest)
+	have := b.treeDigest
+	if b.forceTree.Swap(false) {
+		have = "" // rebuild the view even if Source's tree is byte-identical
+	}
+	entries, digest, unchanged, err := b.source.Tree(ctx, have)
 	if err != nil {
 		return err
 	}
@@ -649,3 +659,29 @@ func (b *Backend) RecordDelete(rel string) error {
 
 // Stop signals background workers to exit.
 func (b *Backend) Stop() { close(b.stop) }
+
+// DropPending abandons queued journal entries: the local intent is thrown away,
+// Source is left untouched, and the next tree sync restores whatever those
+// entries were hiding (a dropped delete un-hides the path again). rels selects
+// entries at or under each path; an empty rels drops everything.
+//
+// This is the escape hatch `lg pending drop` needs — deleting a big directory
+// through Finder queues one entry per file, and if Source refuses them (files
+// owned by another user) there was previously no way to clear the queue.
+// Cached content for dropped writes is removed too: that copy was the local
+// edit being abandoned, and keeping it would shadow Source's version.
+func (b *Backend) DropPending(rels []string) int {
+	dropped, err := b.journal.Drop(SelectRels(rels))
+	if err != nil {
+		b.log.Warn("dropping pending entries: journal compaction failed", "err", err)
+	}
+	for _, e := range dropped {
+		if e.Op == OpWrite || e.Op == OpCreate {
+			_ = os.Remove(b.cachePath(e.Rel))
+			b.index.SetHaveContent(e.Rel, false)
+		}
+	}
+	b.forceTree.Store(true) // re-show paths the dropped deletes had hidden
+	b.log.Info("dropped pending journal entries", "count", len(dropped), "paths", len(rels))
+	return len(dropped)
+}

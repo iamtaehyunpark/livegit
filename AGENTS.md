@@ -233,6 +233,7 @@ hand those to the human. Settings change safely later via
 | ENXIO / "device not configured" touching the mount | Stale mount from a killed holder. | `lg unmount`, then remount. (`lg mount`/`lg shell` also auto-recover this.) |
 | A `lg run` command never returns | The remote program is waiting for interactive input. | Interrupt it; rerun non-interactively, or do the work through the mount. |
 | `flush barrier: timed out (continuing)` | A mount edit hadn't reached the server in 10s (offline?). | Check `lg status` (journal pending? connection?); rerun once it drains. |
+| `lg status` shows pending writes that never drop | Something in the queue can't be applied on the server — usually a delete of a file owned by another user (log: `flush parked`). The rest of the queue still drains past it. | `lg pending` shows the queue; `lg pending drop <path> -y` abandons those entries (server untouched; the paths reappear at the next tree sync). Ask the human before `--all` — it also discards unflushed local edits. |
 | log shows `lg: command not found` (remote) | Agent binary missing on the server. | `lg connect` (human, if 2FA) auto-deploys/upgrades it; or `lg init` again. |
 | `Permission denied` on a remote path | Server-side Unix perms. | Not an lg problem — report it. |
 

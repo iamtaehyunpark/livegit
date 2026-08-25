@@ -39,6 +39,7 @@ type Journal struct {
 	mu      sync.Mutex
 	f       *os.File
 	pending []JournalEntry
+	parked  map[uint64]bool // seqs Peek skips (see Park)
 	nextSeq uint64
 	notify  chan struct{} // signals the flush worker that work exists
 }
@@ -143,14 +144,18 @@ func (j *Journal) Notify() <-chan struct{} { return j.notify }
 // Wake forces the flush worker to re-check (used on reconnect).
 func (j *Journal) Wake() { j.mu.Lock(); j.signal(); j.mu.Unlock() }
 
-// Peek returns the oldest pending entry, or false if empty.
+// Peek returns the oldest flushable pending entry, or false if none is left.
+// Parked entries are skipped so one permanently failing entry cannot block the
+// whole queue behind it.
 func (j *Journal) Peek() (JournalEntry, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if len(j.pending) == 0 {
-		return JournalEntry{}, false
+	for _, e := range j.pending {
+		if !j.parked[e.Seq] {
+			return e, true
+		}
 	}
-	return j.pending[0], true
+	return JournalEntry{}, false
 }
 
 // Ack removes a flushed entry (by seq) and compacts the on-disk log.
@@ -173,6 +178,9 @@ func (j *Journal) PendingForDir(relDir string) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	for _, e := range j.pending {
+		if j.parked[e.Seq] {
+			continue // never flushable; waiting on it would just burn the timeout
+		}
 		if relDir == "" || e.Rel == relDir || hasPathPrefix(e.Rel, relDir) {
 			return true
 		}
@@ -287,4 +295,65 @@ func hasPathPrefix(rel, dir string) bool {
 		return true
 	}
 	return len(rel) > len(dir) && rel[:len(dir)] == dir && rel[len(dir)] == '/'
+}
+
+// Park marks an entry as unflushable-for-now: Peek skips it, so the queue
+// drains past a head that keeps failing (a delete Source refuses with EACCES
+// used to strand every entry behind it). Parking is in-memory only — the entry
+// stays in the on-disk log and is retried on the next mount. `lg pending`
+// reports parked entries; `lg pending drop` clears them for good.
+func (j *Journal) Park(seq uint64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.parked == nil {
+		j.parked = map[uint64]bool{}
+	}
+	j.parked[seq] = true
+}
+
+// ParkedCount returns how many entries are currently parked.
+func (j *Journal) ParkedCount() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return len(j.parked)
+}
+
+// SelectRels builds the Drop matcher for a list of paths: an entry matches if
+// it IS one of them or lives under one (deleting a directory queues one entry
+// per file, so a path always means its whole subtree). An empty list matches
+// everything.
+func SelectRels(rels []string) func(JournalEntry) bool {
+	return func(e JournalEntry) bool {
+		if len(rels) == 0 {
+			return true
+		}
+		for _, r := range rels {
+			if e.Rel == r || hasPathPrefix(e.Rel, r) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// Drop removes pending entries for which match reports true and compacts the
+// on-disk log. It is the escape hatch behind `lg pending drop`: the local
+// intent is abandoned, Source is left as it is, and the next tree sync
+// resurfaces whatever the dropped entries were hiding. Returns the entries
+// dropped (callers use them to clear abandoned cache copies).
+func (j *Journal) Drop(match func(JournalEntry) bool) ([]JournalEntry, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	var dropped []JournalEntry
+	out := j.pending[:0]
+	for _, e := range j.pending {
+		if match(e) {
+			dropped = append(dropped, e)
+			delete(j.parked, e.Seq)
+			continue
+		}
+		out = append(out, e)
+	}
+	j.pending = out
+	return dropped, j.compactLocked()
 }

@@ -61,6 +61,7 @@ func NewRoot() *cobra.Command {
 		newFlushCmd(),
 		newCancelCmd(),
 		newCacheCmd(),
+		newPendingCmd(),
 		newHookCmd(),
 		newAskpassCmd(),
 	)

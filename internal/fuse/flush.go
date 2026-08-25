@@ -10,6 +10,11 @@ import (
 	"github.com/iamtaehyunpark/livegit/internal/proto"
 )
 
+// flushParkAfter is how many consecutive failures of the same entry mean
+// "permanent, not a blip" — after that the entry is parked (see Journal.Park)
+// so it stops blocking everything queued behind it.
+var flushParkAfter = 5 // var: tests lower it
+
 // RunFlush is the background worker that drains the journal to Source. It is the
 // single write path for both online and offline: online it flushes
 // within ms; offline it parks until the journal is woken on reconnect.
@@ -35,12 +40,21 @@ func (b *Backend) RunFlush(ctx context.Context) {
 					failSeq, failCount = e.Seq, 0
 				}
 				failCount++
-				if failCount == 5 {
-					b.log.Warn("flush stuck: entry keeps failing and blocks the queue",
-						"rel", e.Rel, "op", e.Op, "attempts", failCount, "err", err)
-				} else {
-					b.log.Debug("flush deferred", "rel", e.Rel, "err", err)
+				if failCount >= flushParkAfter {
+					// Not a blip: park it so the rest of the queue can drain.
+					// A permission-denied delete of a Source file we don't own
+					// never succeeds, and used to strand every entry behind it
+					// (75k of them, found live on sclab 2026-08-25). The entry
+					// stays in the log (retried on the next mount) and is
+					// listed by `lg pending`, which can drop it for good.
+					b.journal.Park(e.Seq)
+					b.log.Warn("flush parked: entry keeps failing, skipping past it",
+						"rel", e.Rel, "op", e.Op, "attempts", failCount, "err", err,
+						"hint", "`lg pending` lists it; `lg pending drop <path>` clears it")
+					failSeq, failCount = 0, 0
+					continue // try the next entry instead of blocking here
 				}
+				b.log.Debug("flush deferred", "rel", e.Rel, "err", err)
 				break // transient (e.g. dropped mid-flush); retry on next wake
 			}
 			if e.Seq == failSeq {
@@ -133,7 +147,7 @@ func (b *Backend) FlushAll(ctx context.Context, progress func(left int, rel stri
 			progress(b.journal.PendingCount(), e.Rel)
 		}
 		if err := b.flushEntry(ctx, e); err != nil {
-			return fmt.Errorf("flushing %s: %w", e.Rel, err)
+			return fmt.Errorf("flushing %s: %w (`lg pending drop %s` abandons it)", e.Rel, err, e.Rel)
 		}
 	}
 }

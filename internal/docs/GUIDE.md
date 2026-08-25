@@ -215,6 +215,7 @@ window on demand.
 | `lg disconnect` | Close the cached connection (next command re-authenticates). |
 | `lg toggle` / `lg local` | Turn "everything runs on the server" on / off. |
 | `lg status` | Connection state, toggle, tree-sync freshness, cache, pending writes. |
+| `lg pending` | Show the queue of writes not yet on the server. `lg pending drop <path>` (or `--all`) abandons them. |
 | `lg scan [dir]` | List every lg project on this machine (default `$HOME`) and its connection state. |
 | `lg config show` | Print the active project's config. |
 | `lg config set <key> <val>` | Change a setting (e.g. `lg config set source.port 2222`). |
@@ -259,6 +260,7 @@ uses that one. Outside any project, `lg` says "not an lg project — run `lg ini
 | `lg shell` won't stop / stale mount | `lg unmount`. `lg shell` and `lg mount` also auto-recover stale mounts on start. |
 | "already mounted — an `lg shell` or `lg mount` is active" | The folder is already being served — just use it. To take it down first: `exit` that shell, or `lg unmount`. |
 | Permission denied writing files | Server-side: the repo may be owned by a different user. Fix ownership/group on the server, or connect as the owning account. |
+| Pending writes pile up and never clear | Something in the queue can't be applied on the server (usually a delete of a file owned by another user). `lg pending` shows the queue; `lg pending drop <path>` abandons those entries — the server is left untouched and the paths reappear in the mount at the next tree sync. Deleting a folder in Finder queues one entry per file, so a stuck queue is often tens of thousands of entries. |
 | "not an lg project" | You're outside a project directory — `cd` into one, or `lg init` here. |
 | Password moved to a new laptop | The encrypted store is machine-bound; re-run `lg init` to re-enter it. |
 

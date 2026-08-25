@@ -169,6 +169,16 @@ have an in-memory end-to-end test in `internal/agent/integration_test.go`.
   fragment, or mount path): cancel just those, keeping their staging so a
   re-open resumes. A live mount is signaled (SIGUSR1 via `.lg/run/mount.pid`;
   targeted rels ride in `.lg/run/cancel.req`); blocked readers get EIO.
+- `lg pending` — show the unflushed-write queue: per-op totals, the paths
+  carrying the bulk of it, and the oldest entries (`--limit N`).
+  `lg pending drop <path>...` / `--all` **abandons** entries: the local intent
+  is thrown away, Source is untouched, and the next tree sync re-shows whatever
+  a dropped delete was hiding. Dropping a write also deletes its cached copy
+  (that copy WAS the abandoned edit) — confirmed interactively unless `-y`.
+  A live mount owns the journal, so the CLI asks it over SIGUSR2 (`.lg/run/
+  drop.req` carries the rels, `drop.ack` the count); with no mount it rewrites
+  journal.log itself. Mounts advertise the handler via `.lg/run/mount.caps` —
+  a pre-v1.5.3 mount is refused rather than signaled (SIGUSR2 would kill it).
 - `lg cache` / `lg cache clear` — show / empty the content cache. Clear always
   keeps files with unflushed journal entries (only copy of local edits) and
   prunes the emptied dir skeleton; everything else refetches on demand.
@@ -446,6 +456,14 @@ lg unmount; ssh galaxy-04 'pkill -f "lg serve"'`.
   full file), `lg unmount` aborts in-flight fetches instead of hanging behind
   them, and `cache.evict_after_idle_minutes` actually works (it was a dead
   knob; eviction now also uses real atime for LRU instead of the Source mtime).
+- **A permanently failing entry no longer wedges the queue** (v1.5.3): after 5
+  consecutive failures the flush worker *parks* it (in-memory flag, `Journal.
+  Park`; `Peek` skips it) and drains the rest, logging `flush parked`. Parking
+  is not forgetting — the entry stays in journal.log and is retried on the next
+  mount; `lg pending drop` is how it goes away for good. Found live on sclab
+  2026-08-25: a Finder delete of dirs owned by another user on Source queued
+  75,482 deletes, the head failed with EACCES forever, and every entry behind
+  it (including 32 real local edits) was stranded with no way to clear them.
 - `.git` is still synced into the mount (only `ignore` patterns are skipped). Add
   `.git/` to config `ignore` if you want it out — git ops should run via `lg <cmd>`.
 - `lg toggle` uses the zsh/bash preexec hook; the bash DEBUG-trap path is

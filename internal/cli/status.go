@@ -126,6 +126,9 @@ func printStatus(c *config.Config) error {
 		if len(pend) > len(show) {
 			fmt.Printf("  … and %d more\n", len(pend)-len(show))
 		}
+		if len(pend) > 0 {
+			fmt.Println("  (`lg pending` for the whole queue; `lg pending drop` abandons entries)")
+		}
 	}
 	return nil
 }
