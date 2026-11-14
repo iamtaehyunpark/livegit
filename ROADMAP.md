@@ -76,3 +76,24 @@ One sync core, per-platform thin front-ends — exactly how OneDrive/Dropbox
 are built: FileProvider (macOS) + CFAPI (Windows) + FUSE (Linux), all
 consuming `Backend`. Every step above is an addition, not a rewrite, as long
 as the Backend/skin boundary stays clean.
+
+## 6. Multi-remote per project (multiple Sources on one Ghost) — trigger: working on one repo across multiple GPU boxes/clusters from a single local directory. Effort: days.
+
+Today, one `.lg/config.yaml` maps 1:1 to a single `source` + `local_root` +
+`cache/` + `journal.log` (workaround: separate project directories or
+`LG_HOME=...` overrides with distinct `local_root`s).
+
+Design for first-class multi-remote:
+- **Isolated state per remote:** Store named profiles under
+  `.lg/remotes/<name>/` (`config.yaml`, `cache/`, `journal.log`, `tree.json`,
+  `lg.log`), with `.lg/active` pointing to the current default remote.
+- **No shared mount / split-brain:** Because `lg` treats Source as the single
+  source of truth, two remotes must never share a live FUSE mount or write
+  journal. Two UX modes:
+  1. *Active-switch mode (`lg remote use <name>`):* flushes pending writes,
+     unmounts the current remote, and mounts `<name>` at `<repo-name>/`.
+  2. *Per-remote mount mode:* mounts `<name>` at `<project>/<name>/` so
+     multiple remotes can be browsed simultaneously, with `lg -r <name> run -- …`
+     targeting a specific remote.
+- **CLI surface:** `lg remote add/ls/use/rm`, `lg -r <name> <cmd>`, and
+  `lg uninit --remote <name>` (or removing all remotes on full `lg uninit`).

@@ -80,6 +80,25 @@ func EnsureAgent(cfg *config.Config, pick AgentPicker, wantVersion string) (stri
 	return fmt.Sprintf("deployed agent to ~/.local/bin/lg (linux-%s, %s)", goarch, strings.TrimSpace(ver)), nil
 }
 
+// RemoveAgent deletes ~/.local/bin/lg on Source (the path EnsureAgent deploys
+// to). Returns a short human-readable status message.
+func RemoveAgent(cfg *config.Config) (string, error) {
+	run, cleanup, err := agentRunner(cfg)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+
+	out, err := run(`if [ -e "$HOME/.local/bin/lg" ]; then rm -f "$HOME/.local/bin/lg" && echo removed; else echo absent; fi`, nil)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out) == "removed" {
+		return "removed ~/.local/bin/lg on Source", nil
+	}
+	return "no ~/.local/bin/lg found on Source", nil
+}
+
 // agentRunner picks the transport for EnsureAgent's commands: the system ssh
 // binary (over lg's master) for system mode, else the native Go client.
 func agentRunner(cfg *config.Config) (sshRunner, func(), error) {

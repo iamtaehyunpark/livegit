@@ -42,6 +42,7 @@ func NewRoot() *cobra.Command {
 
 	root.AddCommand(
 		newInitCmd(),
+		newUninitCmd(),
 		newConfigCmd(),
 		newConnectCmd(),
 		newDisconnectCmd(),
