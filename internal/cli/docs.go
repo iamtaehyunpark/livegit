@@ -9,7 +9,7 @@ import (
 	"github.com/iamtaehyunpark/livegit/internal/docs"
 )
 
-// Project-root docs (GUIDE.md / AGENTS.md) are managed like the remote agent
+// Project-root docs (GUIDE.md) are managed like the remote agent
 // binary: dropped by `lg init`, then kept in step with the running build by
 // `lg connect` / `lg refresh` when the version changes. A marker line at the
 // top records which version wrote the file AND gates the refresh — a file

@@ -22,16 +22,16 @@ func TestFindProjectDir(t *testing.T) {
 	}
 
 	// From a deep subdirectory, discovery walks up to the project's .lg.
-	if got, ok := findProjectDir(sub); !ok || got != lg {
+	if got, ok := FindProjectDir(sub); !ok || got != lg {
 		t.Fatalf("from subdir: got %q ok=%v, want %q", got, ok, lg)
 	}
 	// From the project root itself.
-	if got, ok := findProjectDir(proj); !ok || got != lg {
+	if got, ok := FindProjectDir(proj); !ok || got != lg {
 		t.Fatalf("from root: got %q ok=%v, want %q", got, ok, lg)
 	}
 	// Outside any project: not found.
 	other := t.TempDir()
-	if got, ok := findProjectDir(other); ok {
+	if got, ok := FindProjectDir(other); ok {
 		t.Fatalf("unrelated dir should not resolve, got %q", got)
 	}
 }

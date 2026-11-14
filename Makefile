@@ -21,12 +21,10 @@ PLATFORMS   := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 AGENTDIR := internal/agentbin/data
 DOCSDIR  := internal/docs
 
-## docs: sync the embedded guides with the repo-root originals (so `lg init`
-## drops the current GUIDE.md / AGENTS.md into each project root; AGENTS.md is
-## also dropped as CLAUDE.md — mapped in internal/docs/embed.go, not a file here.
-## Do NOT copy the repo-root CLAUDE.md: that's this repo's own dev notes).
+## docs: sync the embedded human guide with the repo-root original (so `lg init`
+## drops the current GUIDE.md into each project root).
 docs:
-	@cp GUIDE.md AGENTS.md $(DOCSDIR)/
+	@cp GUIDE.md $(DOCSDIR)/
 	@echo "synced embedded docs in $(DOCSDIR)"
 
 ## agents: cross-compile the Linux agent binaries embedded into the host binary

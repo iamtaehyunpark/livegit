@@ -281,7 +281,7 @@ the single source of truth for content — think "iTerm2 + ssh, but invisible" p
 
 ---
 
-*Working with an AI coding agent? Point it at [`AGENTS.md`](AGENTS.md) — also
-dropped as `CLAUDE.md`, the filename Claude Code loads natively — it
-teaches an agent to drive `lg` at full power: running commands, mounting the
-tree for native file edits, and leaving long jobs running detached.*
+*Working with an AI coding agent? Run `lg skill install` once on your machine to
+install the `livegit` skill and `SessionStart` hook (for Claude Code, Codex, and
+Antigravity) — agents will automatically detect `.lg/` projects and know how to
+run commands, mount the tree for native file edits, and manage detached jobs.*

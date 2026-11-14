@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/iamtaehyunpark/livegit/internal/docs"
 )
 
 // The doc sync must: write missing files stamped, refresh only marker-carrying
@@ -12,7 +14,7 @@ import (
 // unmarked (user-owned) file.
 func TestSyncDocFile(t *testing.T) {
 	dir := t.TempDir()
-	dst := filepath.Join(dir, "AGENTS.md")
+	dst := filepath.Join(dir, "GUIDE.md")
 	content := []byte("# agents\nbody v1\n")
 
 	if got := syncDocFile(dst, content, "v1.2.2"); got != "written" {
@@ -52,7 +54,7 @@ func TestSyncDocFile(t *testing.T) {
 
 	// An unmarked file is user-owned (pre-existing, marker removed, or written
 	// by a pre-marker lg) — never overwritten, whatever the version says.
-	own := filepath.Join(dir, "GUIDE.md")
+	own := filepath.Join(dir, "CUSTOM.md")
 	if err := os.WriteFile(own, []byte("my own guide\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -62,5 +64,15 @@ func TestSyncDocFile(t *testing.T) {
 	b, _ = os.ReadFile(own)
 	if string(b) != "my own guide\n" {
 		t.Errorf("unmarked file was modified:\n%s", b)
+	}
+}
+
+func TestProjectDocsExcludeAgentMarkdown(t *testing.T) {
+	files := docs.Files()
+	if len(files) != 1 || files[0].Name != "GUIDE.md" {
+		t.Fatalf("docs.Files() = %+v, want only GUIDE.md", files)
+	}
+	if len(docs.SkillFiles()) == 0 {
+		t.Fatal("docs.SkillFiles() should not be empty")
 	}
 }

@@ -1,13 +1,10 @@
-// Package docs embeds the user- and agent-facing guides so `lg init` can drop
-// them into the project root. That way any CLI or coding agent working in an lg
-// project has GUIDE.md (the human guide) and AGENTS.md (the agent harness) right
-// next to the code it's driving, with no network fetch. The agent guide is also
-// dropped as CLAUDE.md — same content — because Claude Code reads CLAUDE.md
-// natively but does not pick up AGENTS.md on its own.
+// Package docs embeds the human-facing guide and the agent-facing `livegit`
+// skill so `lg` can drop GUIDE.md into project roots and install the skill
+// globally via `lg skill install` with no network fetch.
 //
-// The copies here are kept in sync with the repo-root originals by the Makefile
-// `docs` target (run as part of `make build`); they are committed so plain
-// `go build`/`go test` embed them too.
+// The GUIDE.md copy here is kept in sync with the repo-root original by the
+// Makefile `docs` target (run as part of `make build`); it is committed so
+// plain `go build`/`go test` embed it too.
 package docs
 
 import _ "embed"
@@ -15,22 +12,32 @@ import _ "embed"
 //go:embed GUIDE.md
 var Guide []byte
 
-//go:embed AGENTS.md
-var Agents []byte
+//go:embed skill/SKILL.md
+var SkillMD []byte
 
-// File pairs a project-root filename with its embedded contents.
+//go:embed skill/references/troubleshooting.md
+var SkillTroubleshooting []byte
+
+// File pairs a relative filename with its embedded contents.
 type File struct {
 	Name    string
 	Content []byte
 }
 
-// Files are the docs `lg init` writes into the project root. CLAUDE.md is the
-// AGENTS.md content under the filename Claude Code actually loads; both stay
-// marker-gated, so a project's own CLAUDE.md (no lg marker) is never touched.
+// Files are the docs `lg init` / `lg connect` / `lg refresh` write into the
+// project root. Only GUIDE.md (the human guide) is placed per-project; agent
+// instructions live in the `livegit` skill + session-start hook instead.
 func Files() []File {
 	return []File{
 		{Name: "GUIDE.md", Content: Guide},
-		{Name: "AGENTS.md", Content: Agents},
-		{Name: "CLAUDE.md", Content: Agents},
+	}
+}
+
+// SkillFiles returns the files that make up the `livegit` agent skill,
+// relative to the skill directory (`livegit/`).
+func SkillFiles() []File {
+	return []File{
+		{Name: "SKILL.md", Content: SkillMD},
+		{Name: "references/troubleshooting.md", Content: SkillTroubleshooting},
 	}
 }

@@ -96,9 +96,9 @@ var (
 	dirVal  string // resolved active .lg dir for this process ("" = no project)
 )
 
-// findProjectDir walks up from start looking for a directory that contains
+// FindProjectDir walks up from start looking for a directory that contains
 // `.lg/config.yaml`, and returns that `.lg` path. Like git's `.git` discovery.
-func findProjectDir(start string) (string, bool) {
+func FindProjectDir(start string) (string, bool) {
 	dir := start
 	for {
 		lg := filepath.Join(dir, ".lg")
@@ -126,7 +126,7 @@ func Dir() string {
 	// keeps the directory it was launched from.
 	dirOnce.Do(func() {
 		if cwd, err := os.Getwd(); err == nil {
-			if d, ok := findProjectDir(cwd); ok {
+			if d, ok := FindProjectDir(cwd); ok {
 				dirVal = d
 			}
 		}
@@ -270,11 +270,16 @@ func (c *Config) Validate() error {
 // frozen at init time. A non-empty local_root (older configs, or an explicit
 // `lg config set local_root`) pins the mountpoint and wins.
 func (c *Config) MountDir() string {
+	return c.MountDirFrom(Dir())
+}
+
+// MountDirFrom is MountDir resolved relative to an explicit `.lg` directory.
+func (c *Config) MountDirFrom(lgDir string) string {
 	if c.LocalRoot != "" {
 		return filepath.Clean(c.LocalRoot)
 	}
 	name := filepath.Base(strings.TrimRight(c.Source.RemoteRoot, "/"))
-	return filepath.Join(filepath.Dir(Dir()), name)
+	return filepath.Join(filepath.Dir(lgDir), name)
 }
 
 // Save writes the config to the default path, creating ~/.lg if needed.
